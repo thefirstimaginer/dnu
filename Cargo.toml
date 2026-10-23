@@ -1,0 +1,12 @@
+[package]
+name = "imagineos-dnu-kernel"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# Ativa logs de diagnóstico extras (processo, serial numérica, ramfs).
+kernel-debug = []
+
+[dependencies]
+imagineos_abi = { path = "../common/shared/abi" }
+limine = "0.6.5"
