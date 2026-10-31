@@ -5,26 +5,30 @@
 //! credentials database) and `accounts` in turn uses `crate::crypto`, so both
 //! modules have to be declared here for the harness to build.
 
-extern crate imagineos_abi;
 
-#[path = "../drivers/block.rs"]
+// A ABI é compilada dentro do harness (ver `tools/abi.rs`): sem cargo não há
+// `--extern` para o crate dela.
+#[path = "../tools/abi.rs"]
+pub mod abi;
+
+#[path = "../src/block.rs"]
 mod block;
 
 // `installer.rs` alcança `crate::usr::accounts` (que usa `crate::usr::crypto`).
 // Os módulos reais são declarados com `#[path]` relativo a este arquivo e
 // reexportados sob `usr`, o mesmo caminho que o kernel usa em produção.
-#[path = "../usr/accounts.rs"]
+#[path = "../src/accounts.rs"]
 pub mod accounts_impl;
-#[path = "../usr/crypto.rs"]
+#[path = "../src/crypto.rs"]
 pub mod crypto_impl;
 pub mod usr {
     pub use super::accounts_impl as accounts;
     pub use super::crypto_impl as crypto;
 }
 
-#[path = "../fs/dfs/dfs.rs"]
+#[path = "../src/dfs.rs"]
 mod dfs;
-#[path = "../fs/gpt.rs"]
+#[path = "../src/gpt.rs"]
 mod gpt;
 
 mod ata {
@@ -59,9 +63,32 @@ mod ramfs {
     pub fn read(_path: &str) -> Option<&'static [u8]> {
         None
     }
+
+    // Sem raiz volátil montada no harness, a gravação em RAMFS é um no-op.
+    pub fn write_file_as(
+        _path: &str,
+        _bytes: &[u8],
+        _uid: u32,
+        _gid: u32,
+    ) -> Result<(), FsError> {
+        Ok(())
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum FsError {
+        NotFound,
+    }
 }
 
-#[path = "../fs/installer.rs"]
+// O harness não monta raiz persistente: o instalador escreve só no
+// dispositivo que recebe (SparseDisk), pelas mesmas chamadas do kernel.
+mod vfs {
+    pub fn has_persistent_root() -> bool {
+        false
+    }
+}
+
+#[path = "../src/installer.rs"]
 mod installer;
 
 use std::cell::RefCell;

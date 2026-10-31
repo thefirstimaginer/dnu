@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
-#[path = "../drivers/block.rs"]
+#[path = "../src/block.rs"]
 mod block;
-#[path = "../fs/dfs/dfs.rs"]
+#[path = "../src/dfs.rs"]
 mod dfs;
-#[path = "../fs/gpt.rs"]
+#[path = "../src/gpt.rs"]
 mod gpt;
 
 mod ata {

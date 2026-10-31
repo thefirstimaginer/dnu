@@ -9,7 +9,7 @@
 //   PT_TLS: filesz = 0x30 (48 bytes de .tdata), memsz = 0x1020 (4128)
 //
 // Run with:
-//   rustc --edition 2021 --test dnu_kernel/src/tests/tls_layout.rs -o /tmp/tls-tests && /tmp/tls-tests
+//   rustc --edition 2021 --test tests/tls_layout.rs -o /tmp/tls-tests && /tmp/tls-tests
 
 const TCB_SIZE: u64 = 0x1000;
 const TCB_SELF_OFFSET: u64 = 0;
@@ -82,7 +82,7 @@ fn no_tls_means_no_fs_base() {
 #[test]
 fn the_loader_uses_the_same_constants() {
     // Guarda-corpo: os números acima precisam existir no loader real.
-    let source = include_str!("../exec/loader.rs");
+    let source = include_str!("../src/exec_loader.rs");
     assert!(source.contains("const TCB_SIZE: u64 = 0x1000;"));
     assert!(source.contains("const TCB_SELF_OFFSET: u64 = 0;"));
     assert!(source.contains("let block = stack_pointer"));
@@ -96,7 +96,7 @@ fn the_loader_uses_the_same_constants() {
 fn the_dnulink_marks_the_tls_segment() {
     // O DEF precisa trazer o bloco marcado; sem a marca o loader o trataria
     // como página comum e o `%fs` ficaria sem destino.
-    let source = include_str!("../../../common/tools/dnulink.rs");
+    let source = include_str!("../tools/dnulink.rs");
     assert!(source.contains("const PT_TLS: u32 = 7;"));
     assert!(source.contains("DEF_SEGMENT_TLS"));
 }

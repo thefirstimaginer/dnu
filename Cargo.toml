@@ -1,12 +1,39 @@
+# ==============================================================================
+# DNU (Dreamcore Kernel) — workspace independente
+# ==============================================================================
+#
+# Este repositório não depende do repositório do ImagineOS para construir:
+#
+#   make dzImage      # o único artefato publicado (kernel + initramfs)
+#   make test         # suíte do kernel no host
+#
+# A ABI usada pelo kernel e pelo carregador de DEF é o crate
+# `imagineos_abi`, cuja definição canônica nasce aqui. O ImagineOS consome o
+# `dzImage` gerado por este repositório.
+
 [package]
 name = "imagineos-dnu-kernel"
 version = "0.1.0"
 edition = "2024"
+
+[workspace]
+# `abi/imagineos_abi` é workspace próprio: o kernel aplica `panic = "abort"`,
+# mas ferramentas de host e testes linkam a ABI com unwinding.
+exclude = ["abi/imagineos_abi"]
+resolver = "2"
 
 [features]
 # Ativa logs de diagnóstico extras (processo, serial numérica, ramfs).
 kernel-debug = []
 
 [dependencies]
-imagineos_abi = { path = "../common/shared/abi" }
-limine = "0.6.5"
+imagineos_abi = { path = "abi/imagineos_abi" }
+limine = "0.5.0"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1

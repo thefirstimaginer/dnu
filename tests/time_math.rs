@@ -1,8 +1,8 @@
 // Conversão de ciclos do TSC em tempo — a matemática do relógio do kernel,
 // isolada de portas de E/S para poder ser testada no host.
 //
-// Este arquivo é um módulo de `dnu_kernel/src/drivers/time.rs` (kernel) e é
-// também o módulo `time` de `dnu_kernel/src/tests/trap.rs` (testes), de modo que
+// Este arquivo é um módulo de `drivers/time.rs` (kernel) e é
+// também o módulo `time` de `tests/trap.rs` (testes), de modo que
 // a versão testada e a versão que roda são literalmente a mesma função.
 // Converte ciclos de TSC em microssegundos desde o boot.
 //

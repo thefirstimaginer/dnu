@@ -1,0 +1,19 @@
+[package]
+name = "imagineos_abi"
+version = "0.1.0"
+edition = "2024"
+
+# Contrato binário entre kernel, libc C (`dreamcore.h`), runtime Rust e as
+# ferramentas DEF (`dnu-pack`/`dnulink`). O DNU é o dono desta definição: o
+# formato DEF nasce aqui e o carregador do kernel valida com ela.
+#
+# O crate é `no_std` e compila também no host, para as ferramentas e os
+# harnesses de teste.
+#
+# `[workspace]` vazio: este crate é membro do workspace do kernel (que aplica
+# `panic = "abort"`), mas as ferramentas de host e a suíte de testes o linkam
+# com unwinding. Sem chave própria, o cargo recusa a mistura.
+[workspace]
+
+[profile.release]
+panic = "unwind"

@@ -7,12 +7,12 @@
 //! frame on top. These tests keep the field order honest without booting.
 //!
 //! Run with:
-//! `rustup run stable rustc --edition 2021 --test dnu_kernel/src/tests/trap.rs -o /tmp/trap-tests && /tmp/trap-tests`
+//! `rustup run stable rustc --edition 2021 --test trap.rs -o /tmp/trap-tests && /tmp/trap-tests`
 
 // `drivers/time.rs` importa `crate::abi::trap`; o alias abaixo satisfaz esse
 // caminho para que o mapa de vetores e a matemática do relógio sejam testáveis
 // no host, sem bootar.
-#[path = "../abi/trap.rs"]
+#[path = "../src/abi_trap.rs"]
 pub mod trap_impl;
 
 pub mod abi {
@@ -22,7 +22,7 @@ pub mod abi {
 #[path = "time_math.rs"]
 pub mod time;
 
-#[path = "../drivers/time.rs"]
+#[path = "../src/time.rs"]
 mod drivers_time;
 
 use std::mem::{offset_of, size_of};

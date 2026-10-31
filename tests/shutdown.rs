@@ -38,7 +38,10 @@ mod paging {
 
 fn console_write(_message: &str) {}
 
-mod input {
+// O `acpi` desliga liberando a fila de entrada; o harness não tem driver de
+// teclado, só a porta para a chamada existir.
+#[path = "../src/display_input.rs"]
+mod display_input {
     pub fn release() {}
 }
 
@@ -46,5 +49,5 @@ mod framebuffer {
     pub fn set_active(_active: bool) {}
 }
 
-#[path = "../drivers/acpi.rs"]
+#[path = "../src/acpi.rs"]
 mod power;

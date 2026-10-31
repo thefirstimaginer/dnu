@@ -14,7 +14,7 @@
 //! por sequência no fonte — se alguém trocar a política, o teste avisa.
 //!
 //! Run with:
-//! `rustc --edition 2024 --test dnu_kernel/src/tests/ipc_threads.rs -o /tmp/ipc-tests && /tmp/ipc-tests`
+//! `rustc --edition 2024 --test ipc_threads.rs -o /tmp/ipc-tests && /tmp/ipc-tests`
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -368,7 +368,7 @@ fn the_kernel_orders_the_futex_queue_by_sequence() {
     // Guarda-corpo: o fonte real precisa continuar escolhendo pela sequência e
     // zerando os campos ao acordar. Se alguém trocar a política, este teste
     // (que não sobe o kernel) avisa e os testes acima deixam de valer.
-    let source = include_str!("../exec/process.rs");
+    let source = include_str!("../src/exec_process.rs");
     assert!(source.contains("futex_sequence"));
     assert!(source.contains("NEXT_FUTEX_SEQUENCE"));
     assert!(
@@ -380,7 +380,7 @@ fn the_kernel_orders_the_futex_queue_by_sequence() {
 
 #[test]
 fn the_kernel_splits_vmas_on_partial_munmap() {
-    let source = include_str!("../exec/process.rs");
+    let source = include_str!("../src/exec_process.rs");
     // Os dois `Mapping { start: ... }` da divisão (esquerda e direita).
     assert!(source.contains("length: start - mapping.start"));
     assert!(source.contains("length: mapping.end() - end"));

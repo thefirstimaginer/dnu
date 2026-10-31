@@ -8,69 +8,51 @@ use core::arch::asm;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+// Grafo do kernel: cada `mod` é o arquivo de mesmo nome em `src/` (árvore
+// plana) e os módulos-hub (`usr`, `exec`, `init`, `console`, `arch`) declaram
+// as próprias folhas.
+#[path = "usr_hub.rs"]
 mod usr;
-#[path = "arch/mod.rs"]
+#[path = "arch_hub.rs"]
 mod arch;
-#[path = "ipc/ipc.rs"]
 mod ipc;
-#[path = "io/input.rs"]
-mod input;
-#[path = "drivers/ata.rs"]
+#[path = "display_input.rs"]
+mod display_input;
+
+
 pub mod ata;
-#[path = "drivers/block.rs"]
 pub mod block;
-#[path = "boot/boot.rs"]
 mod boot;
-#[path = "boot/boot_info.rs"]
 mod boot_info;
-#[path = "boot/subsystems.rs"]
+mod dzimage;
 mod subsystems;
 use subsystems::Subsystem;
 use usr::config;
-#[path = "fs/dfs/dfs.rs"]
 mod dfs;
-#[path = "exec/mod.rs"]
+#[path = "exec_hub.rs"]
 pub mod exec;
 pub use exec::process;
-#[path = "init/mod.rs"]
+#[path = "init_hub.rs"]
 pub mod init;
-#[path = "console/mod.rs"]
+#[path = "console_hub.rs"]
 mod console;
-#[path = "arch/x86_64/fpu.rs"]
 mod fpu;
-#[path = "arch/x86_64/gdt.rs"]
 mod gdt;
-#[path = "fs/gpt.rs"]
 pub mod gpt;
-#[path = "mm/heap.rs"]
 mod heap;
-#[path = "arch/x86_64/idt.rs"]
 mod idt;
-#[path = "fs/installer.rs"]
 mod installer;
-#[path = "console/kernel_log.rs"]
 pub mod kernel_log;
-#[path = "drivers/keyboard.rs"]
 mod keyboard;
-#[path = "drivers/mouse.rs"]
 pub mod mouse;
-#[path = "mm/memory.rs"]
 pub mod memory;
-#[path = "arch/x86_64/paging.rs"]
 mod paging;
-#[path = "fs/permissions.rs"]
 mod permissions;
-#[path = "drivers/acpi.rs"]
 mod acpi;
-#[path = "fs/ramfs.rs"]
 mod ramfs;
-#[path = "dev/display/surface.rs"]
 mod surface;
-#[path = "fs/vfs.rs"]
 pub mod vfs;
-#[path = "abi/mod.rs"]
 mod abi;
-#[path = "drivers/time.rs"]
 mod time;
 
 // Reexports dos submódulos de `console` que o resto do kernel referencia pelo
@@ -86,7 +68,9 @@ pub(crate) use console::serial::write_number as serial_write_number;
 pub(crate) use crate::halt as kernel_halt;
 
 static LOG_LINE_START: AtomicBool = AtomicBool::new(true);
-static EMBEDDED_FONT: &[u8] = include_bytes!("../../common/tools/assets/zap-vga16.psf");
+// Fonte PSF embutida no kernel: o dzImage também a leva dentro do initramfs,
+// mas o boot precisa desenhar o console antes de montar a raiz volátil.
+static EMBEDDED_FONT: &[u8] = include_bytes!("assets/zap-vga16.psf");
 
 /// Ponto de entrada ELF visto pelo Limine. O módulo `boot` coleta as respostas
 /// das requisições do protocolo Limine, monta o `BootInfo` e chama `kernel_entry`.
@@ -151,6 +135,8 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
     abi::anchor_runtime_state();
     let disk_ready = probe_storage();
     mount_root_filesystems(boot_info, disk_ready);
+    // Inicializa o sistema de contas (tenta carregar users.db de DFS para RAMFS).
+    usr::accounts::init_accounts();
     start_init()
 }
 
@@ -222,11 +208,12 @@ fn report_dfs_partition() {
     }
 }
 
-/// Monta o RAMFS do `initramfs.img` e, se houver, o DFS persistente por cima.
-/// Aplica também a configuração global e a fonte PSF da raiz ativa.
+/// Monta o RAMFS com o membro `initramfs` do `dzImage` e, se houver, o DFS
+/// persistente por cima. Aplica também a configuração global e a fonte PSF da
+/// raiz ativa.
 fn mount_root_filesystems(boot_info: &boot_info::BootInfo, disk_ready: bool) {
     let Some(ramfs_image) = embedded_initramfs(boot_info) else {
-        console_write("initramfs.img missing; stopping safely\n");
+        console_write("dzImage has no initramfs member; stopping safely\n");
         crate::halt();
     };
     ramfs::mount(ramfs_image);
@@ -251,19 +238,16 @@ fn mount_root_filesystems(boot_info: &boot_info::BootInfo, disk_ready: bool) {
     subsystems::mark_ready(Subsystem::Configuration);
 }
 
-/// Localiza o módulo `initramfs.img` carregado pelo Limine.
+/// Extrai o membro `initramfs` do `dzImage` carregado pelo Limine.
 fn embedded_initramfs(boot_info: &boot_info::BootInfo) -> Option<&'static [u8]> {
-    if boot_info.modules.is_null() {
+    if boot_info.dzimage.is_null() {
         return None;
     }
-    let response = unsafe { &*boot_info.modules };
-    response
-        .modules()
-        .iter()
-        .find(|module| module.path().to_bytes().ends_with(b"initramfs.img"))
-        .map(|module| unsafe {
-            core::slice::from_raw_parts(module.addr(), module.size() as usize)
-        })
+    let image = unsafe {
+        core::slice::from_raw_parts(boot_info.dzimage, boot_info.dzimage_size)
+    };
+    let member = dzimage::initramfs_member(image).ok()?;
+    Some(member.payload(image))
 }
 
 fn load_global_config() {

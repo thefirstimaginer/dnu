@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-#[path = "../drivers/block.rs"]
+#[path = "../src/block.rs"]
 mod block;
-#[path = "../fs/gpt.rs"]
+#[path = "../src/gpt.rs"]
 mod gpt;
 
 use block::{BlockDevice, BlockError, SECTOR_SIZE};
