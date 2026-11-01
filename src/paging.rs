@@ -7,6 +7,8 @@ const ENTRY_PRESENT: u64 = 1;
 const ENTRY_WRITABLE: u64 = 1 << 1;
 const ENTRY_USER: u64 = 1 << 2;
 const ENTRY_HUGE: u64 = 1 << 7;
+/// Bit NX (No-Execute): desativa a execução de código nesta página.
+const ENTRY_NX: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 const USER_MIN: u64 = 0x400000;
 const USER_MAX: u64 = 0x0000_8000_0000_0000;
@@ -28,22 +30,40 @@ pub enum MapError {
 /// Permissões de uma página de usuário (bit a bit).
 ///
 /// Espelha `PROT_*` da ABI, mas vive aqui para o módulo de paginação não
-/// depender de `crate::abi`: o `mmap` traduz `PROT_WRITE` para cá.
+/// depender de `crate::abi`: o `mmap` traduz `PROT_WRITE`/`PROT_EXEC` para cá.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageFlags(u8);
 
 impl PageFlags {
+    /// Página somente-leitura, não executável (W^X: nem escrita nem execução).
+    pub const READ_ONLY: Self = Self(0);
+    /// Página gravável, não executável (dados, pilha, heap).
     pub const READ_WRITE: Self = Self(1);
-    /// Página de código reservada por `mmap(PROT_READ|PROT_EXEC)`.
+    /// Página somente-leitura, executável (código).
     pub const READ_EXEC: Self = Self(2);
 
     pub const fn is_writable(self) -> bool {
         self.0 & 1 != 0
     }
 
+    pub const fn is_executable(self) -> bool {
+        self.0 & 2 != 0
+    }
+
     /// Bits a somar na PTE (o bit `PRESENT`/`USER` fica a cargo do mapeador).
+    ///
+    /// W^X: uma página não pode ser simultaneamente gravável e executável.
+    /// Páginas não executáveis recebem o bit NX para impedir execução de
+    /// shellcode injetado.
     const fn entry_bits(self) -> u64 {
-        if self.is_writable() { ENTRY_WRITABLE } else { 0 }
+        let mut bits = 0u64;
+        if self.is_writable() {
+            bits |= ENTRY_WRITABLE;
+        }
+        if !self.is_executable() {
+            bits |= ENTRY_NX;
+        }
+        bits
     }
 }
 
@@ -62,11 +82,23 @@ impl AddressSpace {
         })
     }
 
-    /// Mapeia uma página de usuário, legível e gravável.
+    /// Mapeia uma página de usuário, somente-leitura e não executável.
     ///
-    /// Mantido como atalho para o loader e para `try_map_range`; proteções
-    /// específicas (`mmap`) usam [`AddressSpace::map_user_page_with`].
+    /// Usada para páginas que não precisam de escrita nem execução. É o
+    /// padrão seguro para W^X: nenhuma página é gravável nem executável a
+    /// menos que o chamador solicite explicitamente.
     pub fn map_user_page(&self, virtual_address: u64) -> Result<*mut u8, MapError> {
+        self.map_user_page_with(virtual_address, PageFlags::READ_ONLY)
+    }
+
+    /// Mapeia uma página de usuário, legível e gravável (não executável).
+    ///
+    /// Usada para pilha, heap e segmentos de dados. Recebe o bit NX para
+    /// impedir execução de código injetado nessas páginas.
+    pub fn map_user_page_writable(
+        &self,
+        virtual_address: u64,
+    ) -> Result<*mut u8, MapError> {
         self.map_user_page_with(virtual_address, PageFlags::READ_WRITE)
     }
 
@@ -130,7 +162,12 @@ impl AddressSpace {
     /// páginas já instaladas em vez de deixar o processo com um mapeamento
     /// parcial invisível. A faixa não precisa estar alinhada ao início da
     /// página: páginas parciais são mapeadas por inteiro, como o POSIX manda.
-    pub fn try_map_range(&self, start: u64, length: u64) -> Result<(), MapError> {
+    pub fn try_map_range(
+        &self,
+        start: u64,
+        length: u64,
+        flags: PageFlags,
+    ) -> Result<(), MapError> {
         if length == 0 {
             return Err(MapError::InvalidAddress);
         }
@@ -156,7 +193,7 @@ impl AddressSpace {
         let mut mapped = first;
         page = first;
         while page <= last {
-            match self.map_user_page(page) {
+            match self.map_user_page_with(page, flags) {
                 Ok(_) => {
                     // `mapped` é o fim exclusivo do que já foi instalado.
                     mapped = page.checked_add(PAGE_SIZE).ok_or(MapError::InvalidAddress)?;
@@ -361,6 +398,7 @@ pub fn map_framebuffer_range(
         virtual_address: u64,
         physical_address: u64,
         length: usize,
+        writable: bool,
     ) -> Option<u64> {
         if length == 0 {
             return None;
@@ -377,14 +415,31 @@ pub fn map_framebuffer_range(
             let virtual_page = (virtual_address & !(PAGE_SIZE - 1))
                 .checked_add((index as u64) * PAGE_SIZE)?;
             let physical_page = start_physical.checked_add((index as u64) * PAGE_SIZE)?;
-            let target = self.map_physical_page(virtual_page, physical_page)?;
-            let _ = target;
+            let _ = self.map_physical_page(virtual_page, physical_page, writable)?;
         }
         Some(start_virtual)
     }
 
+    /// Mapeia o framebuffer na metade do usuário como **somente-leitura**.
+    ///
+    /// Usado por `SYS_FB_MAP` para que clients de display não possam gravar
+    /// diretamente na memória física de vídeo.
+    pub fn map_framebuffer_readonly(
+        &self,
+        virtual_address: u64,
+        physical_address: u64,
+        length: usize,
+    ) -> Option<u64> {
+        self.map_framebuffer_range(virtual_address, physical_address, length, false)
+    }
+
     /// Instala uma PTE apontando para uma página física existente.
-    fn map_physical_page(&self, virtual_address: u64, physical_address: u64) -> Option<*mut u8> {
+    fn map_physical_page(
+        &self,
+        virtual_address: u64,
+        physical_address: u64,
+        writable: bool,
+    ) -> Option<*mut u8> {
         if !(USER_MIN..USER_MAX).contains(&virtual_address) {
             return None;
         }
@@ -404,17 +459,19 @@ pub fn map_framebuffer_range(
                 unsafe {
                     ptr::write_bytes(frame.virtual_address, 0, PAGE_SIZE as usize);
                 }
-                *entry = frame.physical_address | ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER;
+                *entry = frame.physical_address | ENTRY_PRESENT | ENTRY_USER;
             } else {
-                *entry |= ENTRY_WRITABLE | ENTRY_USER;
+                *entry |= ENTRY_USER;
             }
             table_physical = *entry & ADDRESS_MASK;
         }
         let table = table_pointer(table_physical)?;
         let entry = unsafe { &mut *table.add(indices[3]) };
-        // O framebuffer é cacheado em write-combining por bons motores; aqui não
-        // há controle de PAT, então mantemos memória cacheável padrão.
-        *entry = physical_address | ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER;
+        let mut bits = ENTRY_PRESENT | ENTRY_USER | ENTRY_NX;
+        if writable {
+            bits |= ENTRY_WRITABLE;
+        }
+        *entry = physical_address | bits;
         memory::phys_to_virt(physical_address)
     }
 

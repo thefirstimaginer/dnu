@@ -28,7 +28,9 @@ pub struct Account {
 }
 
 impl Account {
-    /// Constrói a conta root padrão (senha "root").
+    /// Constrói uma conta root com hash vazio (não autenticável até que uma
+    /// senha real seja definida pelo instalador ou via syscall de troca).
+    #[allow(dead_code)]
     fn root() -> Self {
         let mut username = [0; ACCOUNT_NAME_SIZE];
         username[..4].copy_from_slice(b"root");
@@ -39,19 +41,15 @@ impl Account {
             gid: 0,
             administrator: true,
             salt: [0; 16],
-            password_hash: [0; 32], // Hash vazio aceita a senha "root" sem verificação.
+            password_hash: [0; 32], // Hash vazio: nenhuma senha é aceita até ser definida.
         }
     }
 
-    /// Verifica se a senha corresponde ao hash armazenado.
+    /// Verifica se a senha corresponde ao hash armazenado (constante-tempo).
     ///
-    /// Se o usuário for root (uid == 0) e o hash estiver vazio, aceita a senha
-    /// "root" literal para compatibilidade com o comportamento original.
+    /// Não existe fallback de senha literal: apenas o hash PBKDF2-SHA256 armazenado
+    /// no banco é considerado.
     fn verify_password(&self, password: &[u8]) -> bool {
-        if self.uid == 0 && password == b"root" {
-            // Senha padrão root aceita-se quando hash está vazio (primeiro boot).
-            return true;
-        }
         crate::usr::crypto::pbkdf2_sha256(password, &self.salt, PBKDF2_ITERATIONS)
             .is_some_and(|candidate| constant_time_eq(&candidate, &self.password_hash))
     }
@@ -208,23 +206,9 @@ pub fn save_database(data: &[u8; DATABASE_SIZE]) -> Result<(), ()> {
 }
 
 pub fn authenticate(username: &[u8], password: &[u8]) -> Option<Account> {
-    // Tenta autenticar como root primeiro (compatibilidade com login existente).
-    if username == b"root" {
-        // Aceita a senha padrão ou verifica contra a base de usuários.
-        if password == b"root" {
-            return Some(Account::root());
-        }
-        // Tenta carregar a base de usuários (RAMFS ou DFS).
-        let bytes = load_database()?;
-        if let Some(account) = decode_account(&bytes) {
-            if account.uid == 0 && account.verify_password(password) {
-                return Some(account);
-            }
-        }
-        // Se não houver base de usuários com root hash, cai de volta à senha padrão.
-        return (password == b"root").then(Account::root);
-    }
-    // Autenticação de conta regular (não-root).
+    // Autenticação exclusivamente contra o banco de usuários persistente.
+    // Não existe backdoor de senha literal: a primeira conta deve ser criada
+    // pelo instalador (`distroinstall`) ou via syscall de troca de senha.
     let bytes = load_database()?;
     let account = decode_account(&bytes)?;
     (username == &account.username[..account.username_length] && account.verify_password(password))

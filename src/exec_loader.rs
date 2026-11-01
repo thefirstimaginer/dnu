@@ -11,11 +11,12 @@ use crate::abi::trap::TrapFrame;
 use crate::exec::def::{self, Def};
 use crate::fpu;
 use crate::gdt;
-use crate::paging::{AddressSpace, MapError};
+use crate::paging::{AddressSpace, MapError, PageFlags};
 use crate::exec::process::{
     FpuState, Priority, Process, KERNEL_STACK_SIZE, KERNEL_STACKS, MAX_EXEC_ARGS, MAX_EXEC_ENV,
     PAGE_SIZE, USER_HEAP_START, USER_STACK_SIZE, USER_STACK_TOP,
 };
+use imagineos_abi::def::DefPermissions;
 
 use super::space::copy_to_space_result;
 
@@ -41,6 +42,7 @@ struct LoadedSegment {
     memory_size: u64,
     file_offset: usize,
     file_size: usize,
+    permissions: u32,
 }
 
 /// Um segmento de TLS lido do DEF (`reserved & DEF_SEGMENT_TLS`).
@@ -128,6 +130,7 @@ fn loaded_segment(image: &Image<'_>, index: usize) -> Result<Option<LoadedSegmen
             memory_size: segment.memory_size,
             file_offset: segment.file_offset,
             file_size: segment.file_size,
+            permissions: segment.permissions,
         }))
 }
 
@@ -152,6 +155,51 @@ pub fn execve_frame_scratch(slot: usize) -> Option<*mut TrapFrame> {
     Some((base + offset) as *mut TrapFrame)
 }
 
+/// Credenciais de um processo recém-criado.
+///
+/// Somente o PID 1 (init) nasce com `uid = 0` (root). Todos os demais
+/// herdam as credenciais do processo que os criou via `fork`/`spawn`.
+#[derive(Clone, Copy)]
+pub struct ProcessCredentials {
+    pub uid: u32,
+    pub gid: u32,
+    pub is_admin: bool,
+    pub username: [u8; imagineos_abi::ACCOUNT_NAME_SIZE],
+    pub username_length: usize,
+}
+
+impl ProcessCredentials {
+    /// Credenciais do root (usado apenas pelo PID 1 no boot).
+    pub const ROOT: Self = Self {
+        uid: 0,
+        gid: 0,
+        is_admin: true,
+        username: {
+            let mut u = [0; imagineos_abi::ACCOUNT_NAME_SIZE];
+            u[0] = b'r';
+            u[1] = b'o';
+            u[2] = b'o';
+            u[3] = b't';
+            u
+        },
+        username_length: 4,
+    };
+
+    /// Credenciais de um usuário comum não-root.
+    pub fn user(uid: u32, gid: u32, is_admin: bool, username: &[u8]) -> Self {
+        let mut name = [0; imagineos_abi::ACCOUNT_NAME_SIZE];
+        let len = username.len().min(name.len());
+        name[..len].copy_from_slice(&username[..len]);
+        Self {
+            uid,
+            gid,
+            is_admin,
+            username: name,
+            username_length: len,
+        }
+    }
+}
+
 /// Monta um `Process` a partir de uma imagem, sem registrá-lo no escalonador.
 #[allow(clippy::too_many_arguments)]
 pub fn load(
@@ -162,25 +210,39 @@ pub fn load(
     allows_disk_install: bool,
     name: &str,
     location: FrameLocation,
+    credentials: ProcessCredentials,
 ) -> Result<Process, LoadError> {
     let image = Def::parse(image).map_err(LoadError::InvalidDef)?;
     let address_space = AddressSpace::new_user().ok_or(LoadError::OutOfMemory)?;
     map_segments(&image, &address_space)?;
 
     let stack_size = stack_size(&image);
-    let stack_start = USER_STACK_TOP
+    // ASLR básico: deslocamento pseudo-aleatório da base da pilha baseado no TSC.
+    // Não é criptograficamente seguro, mas dificulta ataques de memória que
+    // dependem de endereços fixos.
+    let tsc = crate::time::read_tsc();
+    let stack_rand = (tsc % (16 * PAGE_SIZE)) & !(PAGE_SIZE - 1);
+    let stack_top = USER_STACK_TOP
+        .checked_sub(stack_rand)
+        .ok_or(LoadError::InvalidMapping)?;
+    let stack_start = stack_top
         .checked_sub(stack_size)
         .ok_or(LoadError::InvalidMapping)?;
+    // Página de guarda abaixo do fundo da pilha: a pilha cresce para baixo,
+    // então um estouro atinge uma página não mapeada e gera page fault em vez
+    // de corrigir silenciosamente mapeamentos adjacentes.
+    let guard_page = stack_start.checked_sub(PAGE_SIZE).ok_or(LoadError::InvalidMapping)?;
+    let _ = guard_page; // intencionalmente não mapeada: é a página de guarda
     let mut page = stack_start;
-    while page < USER_STACK_TOP {
+    while page < stack_top {
         address_space
-            .map_user_page(page)
+            .map_user_page_writable(page)
             .map_err(|_| LoadError::OutOfMemory)?;
         page += PAGE_SIZE;
     }
     let tls_segment = find_tls_segment(&image)?;
     let (user_stack, user_argv, user_envp) =
-        prepare_user_stack(&address_space, arguments, environment)?;
+        prepare_user_stack(&address_space, stack_top, arguments, environment)?;
 
     // O bloco TLS fica **abaixo** do `rsp` inicial (que já aponta para a pilha
     // de argumentos). Colocá-lo em `USER_STACK_TOP` sobreporia `argv`/`envp`.
@@ -232,21 +294,17 @@ pub fn load(
         exit_status: 0,
         waiting_for: 0,
         quantum: 0,
-        // Imagens carregadas pelo kernel (PID 1) nascem como supervisor; o
-        // `process::init` ajusta o nível conforme o programa. Filhos criados em
-        // userspace herdam a prioridade do pai em `fork`/`spawn`.
+        // O PID 1 (init) recebe credenciais de root via `ProcessCredentials::ROOT`.
+        // Todos os demais herdam as credenciais do pai via `fork`/`spawn`.
         priority: Priority::Supervisor,
         slice_used: 0,
+        kernel_ticks: 0,
         allows_disk_install,
-        uid: 0,
-        gid: 0,
-        is_admin: true,
-        username: {
-            let mut username = [0; imagineos_abi::ACCOUNT_NAME_SIZE];
-            username[..4].copy_from_slice(b"root");
-            username
-        },
-        username_length: 4,
+        uid: credentials.uid,
+        gid: credentials.gid,
+        is_admin: credentials.is_admin,
+        username: credentials.username,
+        username_length: credentials.username_length,
         frame,
         address_space: Some(address_space),
         heap_end: USER_HEAP_START,
@@ -283,9 +341,19 @@ fn map_segments(image: &Image<'_>, address_space: &AddressSpace) -> Result<(), L
             .checked_sub(1)
             .ok_or(LoadError::InvalidMapping)?
             & !(PAGE_SIZE - 1);
+        // W^X: um segmento não pode ser simultaneamente gravável e executável.
+        // Segmentos de código são mapeados como RX (somente-leitura, executável);
+        // segmentos de dados como RW (gravável, não executável).
+        let flags = if segment.permissions & DefPermissions::EXECUTE != 0 {
+            PageFlags::READ_EXEC
+        } else if segment.permissions & DefPermissions::WRITE != 0 {
+            PageFlags::READ_WRITE
+        } else {
+            PageFlags::READ_ONLY
+        };
         let mut page = first_page;
         while page <= last_page {
-            match address_space.map_user_page(page) {
+            match address_space.map_user_page_with(page, flags) {
                 Ok(_) | Err(MapError::AlreadyMapped) => {}
                 Err(_) => return Err(LoadError::OutOfMemory),
             }
@@ -343,12 +411,13 @@ fn build_tls(
         .ok_or(LoadError::InvalidMapping)?;
 
     // Mapeia as páginas do bloco (a pilha já ocupava até `stack_pointer`; o
-    // bloco é novo e pode cair em páginas ainda não mapeadas).
+    // bloco é novo e pode cair em páginas ainda não mapeadas). O bloco TLS é
+    // gravável e não executável.
     let start = block & !(PAGE_SIZE - 1);
     let end = stack_pointer;
     let mut page = start;
     while page < end {
-        match address_space.map_user_page(page) {
+        match address_space.map_user_page_writable(page) {
             Ok(_) | Err(MapError::AlreadyMapped) => {}
             Err(_) => return Err(LoadError::OutOfMemory),
         }
@@ -430,13 +499,14 @@ fn initial_frame(
 /// Monta a pilha inicial no padrão SysV: strings, `envp[]`, `argv[]`.
 fn prepare_user_stack(
     space: &AddressSpace,
+    stack_top: u64,
     arguments: &[&[u8]],
     environment: &[&[u8]],
 ) -> Result<(u64, u64, u64), LoadError> {
     if arguments.len() > MAX_EXEC_ARGS || environment.len() > MAX_EXEC_ENV {
         return Err(LoadError::InvalidMapping);
     }
-    let mut stack_pointer = USER_STACK_TOP;
+    let mut stack_pointer = stack_top;
     let mut argument_pointers = [0u64; MAX_EXEC_ARGS];
     let mut environment_pointers = [0u64; MAX_EXEC_ENV];
     for (index, argument) in arguments.iter().enumerate() {

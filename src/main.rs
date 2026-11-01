@@ -25,6 +25,8 @@ pub mod block;
 mod boot;
 mod boot_info;
 mod dzimage;
+#[path = "drivers_hub.rs"]
+pub mod drivers;
 mod subsystems;
 use subsystems::Subsystem;
 use usr::config;
@@ -53,6 +55,7 @@ mod ramfs;
 mod surface;
 pub mod vfs;
 mod abi;
+
 mod time;
 
 // Reexports dos submódulos de `console` que o resto do kernel referencia pelo
@@ -119,15 +122,19 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
     // O servidor de display precisa do endereço físico da memória de vídeo,
     // que é obtido subtraindo o HHDM do ponteiro virtual do framebuffer.
     framebuffer::set_hhdm_offset(boot_info.hhdm_offset);
+    drivers::video::register();
     if !framebuffer::load_font(EMBEDDED_FONT) {
-        kernel_panic("embedded .psf is invalid!\n");
+        console_write("WARNING: embedded .psf is invalid; using fallback font\n");
     }
     mouse::init();
+    // Registro central de drivers: teclado/mouse agora disponíveis.
+    drivers::input::register_all();
     console_write("ImagineOS Astrid w/ Dreamcore Kernel\n");
     report_boot_frames(frame_count, &boot_frame);
     report_clock();
     subsystems::mark_ready(Subsystem::Console);
     acpi::init(boot_info.rsdp_address, boot_info.hhdm_offset);
+    drivers::platform::register();
     subsystems::mark_ready(Subsystem::Acpi);
 
     // Referência única aos globais de I/O da ABI: mantê-los vivos mesmo quando
@@ -168,12 +175,9 @@ fn report_clock() {
 /// Devolve `true` quando há um disco utilizável — o RAMFS usa isso para expor
 /// `/dev/hda`.
 fn probe_storage() -> bool {
-    let sectors = match ata::init() {
-        Ok(sectors) => sectors,
-        Err(_) => {
-            console_write("No usable ATA primary-master disk; continuing without storage\n");
-            return false;
-        }
+    let Some(sectors) = drivers::block::init() else {
+        console_write("No usable ATA primary-master disk; continuing without storage\n");
+        return false;
     };
     console_write("ATA primary master ready; sectors: ");
     console_number(sectors);
@@ -181,6 +185,11 @@ fn probe_storage() -> bool {
     report_dfs_partition();
     subsystems::mark_ready(Subsystem::Storage);
     true
+}
+
+/// Relatório do registro de drivers: tabela `/dev` do kernel.
+fn report_drivers() {
+    drivers::registry::report();
 }
 
 fn report_dfs_partition() {
@@ -236,6 +245,7 @@ fn mount_root_filesystems(boot_info: &boot_info::BootInfo, disk_ready: bool) {
     load_global_config();
     load_font();
     subsystems::mark_ready(Subsystem::Configuration);
+    report_drivers();
 }
 
 /// Extrai o membro `initramfs` do `dzImage` carregado pelo Limine.

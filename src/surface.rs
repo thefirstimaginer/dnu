@@ -170,6 +170,7 @@ pub fn create(info: &mut SurfaceInfo) -> Result<(), i64> {
             client_address,
             frame.physical_address,
             SURFACE_MAX_PIXELS * 4,
+            true, // superfícies precisam de gravação pelo client
         )
     });
     if mapped.is_none() {
@@ -338,6 +339,7 @@ pub fn snapshot_mapped(output: &mut [Snapshot]) -> usize {
                 virtual_address,
                 surface.physical,
                 SURFACE_MAX_PIXELS * 4,
+                false, // servidor só precisa ler para compor
             )
         });
         if mapped.is_none() {

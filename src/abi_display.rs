@@ -19,9 +19,9 @@ use crate::keyboard::Keyboard;
 // A porta PS/2 não tem IRQ própria e é lida em modo polling; o estado do
 // teclado (shift, dead keys, prefixo E0) é um único objeto global. A exclusão
 // mútua é feita desabilitando interrupções durante a leitura (ver `input`).
-pub(super) struct SharedKeyboard(UnsafeCell<Keyboard>);
+pub(crate) struct SharedKeyboard(UnsafeCell<Keyboard>);
 unsafe impl Sync for SharedKeyboard {}
-pub(super) static KEYBOARD: SharedKeyboard =
+pub(crate) static KEYBOARD: SharedKeyboard =
     SharedKeyboard(UnsafeCell::new(Keyboard::new()));
 
 impl SharedKeyboard {
@@ -58,7 +58,7 @@ pub fn framebuffer_map(frame: &mut TrapFrame) -> *mut TrapFrame {
     };
     let length = description.pitch.saturating_mul(description.height);
     let mapped = process::with_current_space(|space| {
-        space.map_framebuffer_range(FB_BASE, description.physical_address, length)
+        space.map_framebuffer_readonly(FB_BASE, description.physical_address, length)
     });
     let Some(address) = mapped else {
         return frame.fail(ENOMEM);

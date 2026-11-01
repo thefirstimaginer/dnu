@@ -80,6 +80,10 @@ pub const MAX_EXEC_ARGS: usize = imagineos_abi::MAX_EXEC_ARGS;
 pub const MAX_EXEC_ENV: usize = imagineos_abi::MAX_EXEC_ENV;
 pub const MAX_OPEN_FDS: usize = imagineos_abi::MAX_OPEN_FDS;
 
+/// Número máximo de ticks que um processo pode ficar em modo kernel durante
+/// uma única syscall antes de ser preemptado voluntariamente (~100 ms a 100 Hz).
+pub(crate) const KERNEL_YIELD_TICKS: u64 = 10;
+
 // A ABI e o resto do kernel usam os descritores pelo caminho curto
 // `crate::process::Descriptor*`, como antes do split em módulos.
 pub use crate::exec::descriptors::{Descriptor, DescriptorKind};
@@ -177,6 +181,11 @@ pub struct Process {
     pub(crate) priority: Priority,
     /// Ticks já usados na fatia atual; zerado a cada troca de contexto.
     pub(crate) slice_used: u64,
+    /// Ticks acumulados enquanto este processo esteve em modo kernel (durante
+    /// uma syscall). Quando excede `KERNEL_YIELD_TICKS`, o escalonador pode
+    /// preemptá-lo voluntariamente para evitar que uma syscall longa trave o
+    /// sistema inteiro (single-core, sem preempção de kernel).
+    pub(crate) kernel_ticks: u64,
     pub(crate) allows_disk_install: bool,
     pub(crate) uid: u32,
     pub(crate) gid: u32,
@@ -238,6 +247,7 @@ impl Process {
         quantum: 0,
         priority: Priority::DEFAULT,
         slice_used: 0,
+        kernel_ticks: 0,
         allows_disk_install: false,
         uid: 0,
         gid: 0,
@@ -314,7 +324,16 @@ pub fn init(programs: &[(&[u8], usize)]) -> Result<(), LoadError> {
         }
         let slot = scheduler.count;
         let arguments: [&[u8]; 1] = [b"/sbin/init"];
-        let process = load(image, pid, slot, &arguments, &[], false, "/sbin/init")?;
+        let process = load(
+            image,
+            pid,
+            slot,
+            &arguments,
+            &[],
+            false,
+            "/sbin/init",
+            loader::ProcessCredentials::ROOT,
+        )?;
         scheduler.processes[scheduler.count] = process;
         scheduler.count += 1;
     }
@@ -354,6 +373,7 @@ fn load(
     environment: &[&[u8]],
     allows_disk_install: bool,
     name: &str,
+    credentials: loader::ProcessCredentials,
 ) -> Result<Process, LoadError> {
     loader::load(
         image,
@@ -363,6 +383,7 @@ fn load(
         allows_disk_install,
         name,
         FrameLocation::TopOfSlot(slot),
+        credentials,
     )
 }
 
@@ -561,48 +582,60 @@ pub fn timer_tick(frame: *mut TrapFrame) -> *mut TrapFrame {
     if frame.is_null() {
         return frame;
     }
-    // Só preempta processos que estavam em **ring 3**.
+    // Se a interrupção ocorreu enquanto o processo estava em **ring 3** (usuário),
+    // consumimos normalmente o quantum de usuário.
     //
-    // Um tick que interrompe o kernel (uma syscall em andamento, `cs & 3 == 0`)
-    // não deve trocar de contexto: a syscall ficaria pendurada no meio, com a
-    // pilha de kernel daquele processo "congelada" em um ponto arbitrário. Era
-    // isto que impedia o `fork` de funcionar com o timer ligado — o filho era
-    // preemptado dentro da própria largada e retomava sempre do mesmo `rip`,
-    // sem nunca executar código de usuário.
+    // Se ocorreu em **ring 0** (kernel, durante uma syscall), acumulamos ticks de
+    // kernel. Quando `kernel_ticks` excede `KERNEL_YIELD_TICKS` (~100 ms), o
+    // escalonador pode preemptar voluntariamente para evitar que uma syscall
+    // longa trave o sistema inteiro (single-core, sem preempção de kernel).
+    // A preempção só acontece se houver outro processo elegível para rodar.
     unsafe {
         let interrupted = &*frame;
-        if interrupted.cs & 3 != 3 {
+        if interrupted.cs & 3 == 3 {
+            // Usuário: comportamento normal de preempção.
+            let scheduler = &mut *SCHEDULER.0.get();
+            scheduler.processes[scheduler.current].kernel_ticks = 0;
+            let current = scheduler.current;
+            if !scheduler.processes[current].active {
+                return frame;
+            }
+            return timer_tick_user(frame, scheduler, current);
+        } else {
+            // Kernel: acumula ticks e verifica se deve ceder voluntariamente.
+            let scheduler = &mut *SCHEDULER.0.get();
+            let current = scheduler.current;
+            if !scheduler.processes[current].active {
+                return frame;
+            }
+            scheduler.processes[current].kernel_ticks += 1;
+            if scheduler.processes[current].kernel_ticks >= KERNEL_YIELD_TICKS
+                && select_candidate(scheduler).is_some()
+            {
+                scheduler.processes[current].kernel_ticks = 0;
+                return schedule(frame, false);
+            }
             return frame;
         }
     }
-    let scheduler = unsafe { &*SCHEDULER.0.get() };
-    let current = scheduler.current;
-    if !scheduler.processes[current].active {
-        return frame;
-    }
+}
+
+/// Preempção normal para processos em modo usuário (ring 3).
+///
+/// Consome um tick do quantum, verifica se a fatia esgotou ou se há um
+/// processo de maior prioridade esperando, e troca de contexto se necessário.
+fn timer_tick_user(
+    frame: *mut TrapFrame,
+    scheduler: &mut Scheduler,
+    current: usize,
+) -> *mut TrapFrame {
     // Enquanto houver alguém bloqueado em `waitpid`, não pede troca: o processo
     // que está rodando precisa consumir o tempo para produzir o evento que
-    // destrava quem espera (um `exit` de filho, por exemplo). Sem isto, dois
-    // `waitpid` concorrentes reescalavam um ao outro a cada tick e nenhum dos
-    // dois progredia.
+    // destrava quem espera.
     if any_waiting() {
         return frame;
     }
 
-    // Escalonamento preemptivo por prioridade: a cada tick o processo em
-    // execução **consome um tick da sua fatia** e o escalonador reavalia quem
-    // deve rodar. Dois motivos para trocar imediatamente:
-    //
-    // 1. fatia esgotada (o processo usou `quantum_ticks()` da sua prioridade);
-    // 2. chegou (ou voltou a ser elegível) um processo de prioridade **maior**,
-    //    que tem direito à CPU agora — é isto que torna a preempção sensível à
-    //    prioridade e não apenas temporal.
-    //
-    // A escolha em si vive em `select_candidate`, que é a mesma função usada
-    // pelas trocas voluntárias (`yield`, `exit`), então as duas rotas não podem
-    // divergir.
-    let scheduler = unsafe { &mut *SCHEDULER.0.get() };
-    let current = scheduler.current;
     let priority = scheduler.processes[current].priority;
     scheduler.processes[current].slice_used += 1;
     let slice_exhausted = scheduler.processes[current].slice_used >= priority.quantum_ticks();
@@ -1236,11 +1269,17 @@ pub fn execve_current(
         return frame;
     };
 
-    let (slot, pid, process) = {
+    let (slot, pid, process, execve_creds) = {
         let scheduler = unsafe { &*SCHEDULER.0.get() };
         let slot = scheduler.current;
         let process = scheduler.processes[slot];
-        (slot, process.pid, process)
+        let creds = loader::ProcessCredentials::user(
+            process.uid,
+            process.gid,
+            process.is_admin,
+            &process.username[..process.username_length],
+        );
+        (slot, process.pid, process, creds)
     };
 
     // `loader::load` monta o novo `TrapFrame` no **topo** da pilha de kernel do
@@ -1263,6 +1302,7 @@ pub fn execve_current(
         path == "/bin/distroinstall",
         path,
         FrameLocation::At(execve_frame),
+        execve_creds,
     ) {
         Ok(process) => process,
         Err(_) => {
@@ -1332,7 +1372,7 @@ pub fn spawn_current_with_io(
         return frame;
     };
 
-    let (slot, pid, parent_slot) = {
+    let (slot, pid, parent_slot, parent_creds) = {
         let scheduler = unsafe { &*SCHEDULER.0.get() };
         let Some(slot) = scheduler
             .processes
@@ -1351,7 +1391,14 @@ pub fn spawn_current_with_io(
             .max()
             .unwrap_or(0)
             + 1;
-        (slot, pid, scheduler.current)
+        let parent = scheduler.processes[scheduler.current];
+        let creds = loader::ProcessCredentials::user(
+            parent.uid,
+            parent.gid,
+            parent.is_admin,
+            &parent.username[..parent.username_length],
+        );
+        (slot, pid, scheduler.current, creds)
     };
 
     // O pai é quem chamou o `spawn`, para que `waitpid` funcione no shell.
@@ -1367,6 +1414,7 @@ pub fn spawn_current_with_io(
         environment,
         path == "/bin/distroinstall",
         path,
+        parent_creds,
     ) {
         Ok(process) => process,
         Err(_) => {
@@ -1494,6 +1542,7 @@ pub fn fork_current(frame: *mut TrapFrame) -> *mut TrapFrame {
         // preserva o nível na criação).
         priority: parent.priority,
         slice_used: 0,
+        kernel_ticks: 0,
         allows_disk_install: parent.allows_disk_install,
         uid: parent.uid,
         gid: parent.gid,
@@ -1968,7 +2017,11 @@ pub fn create_thread(
             - (parent.tgid as u64 % 64 + 1) * (imagineos_abi::THREAD_STACK_SIZE + PAGE_SIZE);
         let start = top - imagineos_abi::THREAD_STACK_SIZE;
         if address_space
-            .try_map_range(start, imagineos_abi::THREAD_STACK_SIZE)
+            .try_map_range(
+                start,
+                imagineos_abi::THREAD_STACK_SIZE,
+                paging::PageFlags::READ_WRITE,
+            )
             .is_err()
         {
             return Err(-12 /* ENOMEM */);
@@ -2023,6 +2076,7 @@ pub fn create_thread(
         quantum: 0,
         priority: parent.priority,
         slice_used: 0,
+        kernel_ticks: 0,
         allows_disk_install: parent.allows_disk_install,
         uid: parent.uid,
         gid: parent.gid,

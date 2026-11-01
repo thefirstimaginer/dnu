@@ -1,7 +1,7 @@
 //! **dnu-pack** — empacotador ELF → DEF (Dreamcore Executable Format).
 //!
 //! O ImagineOS carrega binários no formato DEF (ver
-//! `common/shared/abi/src/def.rs`). O toolchain de userspace, porém, produz ELF
+//! `imagine-common/abi/src/def.rs`). O toolchain de userspace, porém, produz ELF
 //! estático (`x86_64-unknown-none`) porque é o que o `rustc`/`ld` sabem emitir.
 //! Este utilitário é a ponte: lê o ELF já linkado, extrai os segmentos `PT_LOAD`
 //! e reescreve tudo em um contêiner DEF que o loader do kernel aceita, validando
