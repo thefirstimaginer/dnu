@@ -1,51 +1,40 @@
 #!/bin/sh
-# ==============================================================================
-# abi-bundle.sh — agrupa o crate `imagineos_abi` num único `.rs`
-# ==============================================================================
+# abi-bundle.sh — cria um bundle com os fontes da ABI para uso pelas ferramentas de host.
 #
-# As ferramentas de host (`dnu-pack`, `dnulink`) são compiladas por `rustc`
-# direto, sem cargo. O `.rlib` que o `build.rs` da ABI publica contém apenas
-# metadados (o crate não gera código) e o `rustc` não o aceita como `--extern`
-# de outro crate.
+# Uso: abi-bundle.sh <abi-dir> <output-rs>
 #
-# Este script reproduz o agrupamento que o cargo faz: copia `lib.rs` (sem
-# `#![no_std]`, que não é aceito dentro de um `mod`) e concatena os módulos
-# declarados por ele, cada um dentro de `pub mod <nome> { ... }`.
-#
-# Uso:  abi-bundle.sh <raiz do crate> <saida.rs>
+# Lê os arquivos .rs do diretório da ABI e gera um único arquivo Rust com todos
+# os módulos embutidos como strings, para que as ferramentas de host possam
+# compilar e verificar a ABI sem depender do crate do kernel.
 
 set -eu
 
-root=$1
-output=$2
+ABI_DIR="$1"
+OUTPUT="$2"
 
-mkdir -p "$(dirname "$output")"
+if [ -z "$ABI_DIR" ] || [ -z "$OUTPUT" ]; then
+    echo "Uso: $0 <abi-dir> <output-rs>" >&2
+    exit 1
+fi
+
+if [ ! -d "$ABI_DIR" ]; then
+    echo "Erro: diretório da ABI não encontrado: $ABI_DIR" >&2
+    exit 1
+fi
 
 {
-    echo "// ==== Gerado por tools/abi-bundle.sh — não edite à mão. ===="
-    echo "// Fonte: abi/imagineos_abi/src/*.rs"
-    echo "pub mod imagineos_abi {"
-    # Os módulos referenciam `crate::ABI_VERSION`; o `sed` final troca por
-    # `ABI_VERSION`, resolvido neste nível do `mod imagineos_abi`.
-    # `#![no_std]` é atributo interno de crate; dentro de `mod` ele não vale, e
-    # o crate da ABI não usa a std de qualquer forma.
-    sed -e '/^#!\[no_std\]/d' -e '/^pub mod [a-z_0-9]*;$/d' \
-        -e '/^pub use [a-z_0-9]*::\*;$/d' "$root/src/lib.rs"
-    for module in $(sed -n 's/^pub mod \([a-z_0-9]*\);/\1/p' "$root/src/lib.rs"); do
-        echo "pub mod $module {"
-        cat "$root/src/$module.rs"
-        echo "}"
-        # Reexporta como o `lib.rs` fazia (`pub use syscall::*;`).
-        if grep -q "^pub use $module::\*;" "$root/src/lib.rs"; then
-            echo "pub use $module::*;"
-        fi
+    echo "//! Bundle gerado automaticamente a partir da ABI em $ABI_DIR"
+    echo "//! Não edite manualmente; regenere com tools/abi-bundle.sh"
+    echo ""
+    
+    for f in "$ABI_DIR"/src/*.rs; do
+        [ -f "$f" ] || continue
+        echo "// ===== $f ====="
+        cat "$f"
+        echo ""
+        echo "// ===== fim de $f ====="
+        echo ""
     done
-    echo "}"
-} > "$output"
+} > "$OUTPUT"
 
-# O crate original usava `crate::ABI_VERSION` dentro dos módulos; no bundle
-# esses caminhos apontam para o aninhamento do crate consumidor, então o
-# prefixo é removido (a constante está no mesmo `mod imagineos_abi`).
-# Dentro de `imagineos_abi`, a raiz da biblioteca original fica um nível acima
-# (`super::`): o consumidor aninha o bundle sob `crate::abi::imagineos_abi`.
-sed -i 's/crate::/super::/g' "$output"
+echo "Bundle da ABI gerado em $OUTPUT"

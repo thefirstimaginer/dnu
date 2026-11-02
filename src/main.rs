@@ -12,42 +12,37 @@ use core::sync::atomic::{AtomicBool, Ordering};
 // Grafo do kernel: cada `mod` é o arquivo de mesmo nome em `src/` (árvore
 // plana) e os módulos-hub (`usr`, `exec`, `init`, `console`, `arch`) declaram
 // as próprias folhas.
-#[path = "usr_hub.rs"]
-mod usr;
-#[path = "arch_hub.rs"]
-mod arch;
+mod usr_hub;
+mod arch_hub;
 mod ipc;
-#[path = "display_input.rs"]
+mod console_hub;
 mod display_input;
 
-
-pub mod ata;
+pub mod drivers;
 pub mod block;
 mod boot;
 mod boot_info;
 mod dzimage;
+mod distro;
 mod gdi;
 mod window;
 mod compositor;
-#[path = "drivers_hub.rs"]
+mod drivers_hub;
 pub mod drivers;
 mod subsystems;
 use subsystems::Subsystem;
-use usr::config;
 mod dfs;
 #[path = "exec_hub.rs"]
 pub mod exec;
 pub use exec::process;
 #[path = "init_hub.rs"]
 pub mod init;
-#[path = "console_hub.rs"]
 mod console;
 mod fpu;
 mod gdt;
 pub mod gpt;
 mod allocator;
 mod idt;
-mod installer;
 pub mod kernel_log;
 mod keyboard;
 pub mod mouse;
@@ -72,10 +67,6 @@ pub(crate) use console::serial::serial_write;
 #[cfg(feature = "kernel-debug")]
 pub(crate) use console::serial::write_number as serial_write_number;
 pub(crate) use crate::halt as kernel_halt;
-pub(crate) use crate::gdi::{
-    HWND, COLORREF, WS_OVERLAPPED, WS_CAPTION, WS_SYSMENU, WS_THICKFRAME,
-    WS_MINIMIZEBOX, WS_MAXIMIZEBOX, WS_VISIBLE,
-};
 
 static LOG_LINE_START: AtomicBool = AtomicBool::new(true);
 // Fonte PSF embutida no kernel: o dzImage também a leva dentro do initramfs,
@@ -141,62 +132,13 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
     mouse::init();
     // Registro central de drivers: teclado/mouse agora disponíveis.
     drivers::input::register_all();
-    console_write("ImagineOS Astrid w/ Dreamcore Kernel\n");
+    console_write("DNU Kernel v0.1_01\n"); // Incrementar se houver mudanças relevantes
     report_boot_frames(frame_count, &boot_frame);
     report_clock();
     subsystems::mark_ready(Subsystem::Console);
     acpi::init(boot_info.rsdp_address, boot_info.hhdm_offset);
     drivers::platform::register();
     subsystems::mark_ready(Subsystem::Acpi);
-
-    // Inicializa o ambiente gráfico (GDI + Window Manager + Compositor).
-    // O fb.addr() do Limine já é um endereço virtual via HHDM, mas pode estar
-    // mapeado como somente-leitura. Garantimos permissão de escrita antes de usar.
-    if let Some(fb_response) = boot::framebuffer_response() {
-        if let Some(fb) = fb_response.framebuffers().next() {
-            let fb_raw = fb.addr() as usize;
-            let hhdm = boot_info.hhdm_offset as usize;
-
-            // O endereço físico é fb.addr() - hhdm_offset.
-            let physical_address = fb_raw.checked_sub(hhdm).unwrap_or(0) as u64;
-            // Mapeia uma região generosa (16 MB) para cobrir todo o framebuffer
-            // independentemente de pitch/height reportados pelo Limine.
-            let framebuffer_size: usize = 16 * 1024 * 1024;
-
-            // Mapeia o framebuffer físico via HHDM com permissão de escrita.
-            let _mapped = paging::map_hhdm_range(boot_info.hhdm_offset, physical_address, framebuffer_size, true);
-
-            let fb_addr = fb_raw as *mut u8;
-            let fb_width = fb.width() as u32;
-            let fb_height = fb.height() as u32;
-            let fb_pitch = fb.pitch() as u32;
-
-            gdi::gdi_subsystem_init(fb_addr, fb_width, fb_height, fb_pitch);
-            window::window_manager_init();
-            compositor::compositor_init(fb_addr, fb_width, fb_height, fb_pitch);
-
-            // Inicializa o cursor do mouse no centro da tela
-            let cursor_x = fb_width as i32 / 2;
-            let cursor_y = fb_height as i32 / 2;
-            compositor::compositor_set_cursor_pos(cursor_x, cursor_y);
-
-            console_write("Graphics subsystem initialized\n");
-
-            // Criar janela de demonstração
-            let _hwnd = window::create_simple_window(
-                b"Imaginedevel OS\0".as_ptr(),
-                b"ImagineOS\0".as_ptr(),
-                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE,
-                50, 50, 600, 400,
-                HWND(ptr::null_mut()),
-                0,
-                1,
-            );
-
-            // Desenhar área de trabalho com ícones e cursor
-            compositor::compositor_render_all();
-        }
-    }
 
     // Referência única aos globais de I/O da ABI: mantê-los vivos mesmo quando
     // nenhuma syscall é compilada no binário (builds mínimos/testes).
@@ -205,6 +147,12 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
     mount_root_filesystems(boot_info, disk_ready);
     // Inicializa o sistema de contas (tenta carregar users.db de DFS para RAMFS).
     usr::accounts::init_accounts();
+
+    // Lê o nome da distribuição da configuração do RAMFS (se disponível).
+    if let Some(settings) = ramfs::read(crate::distro::DISTRO_CONFIG_PATH) {
+        distro::init_from_bytes(settings);
+    }
+
     // Sistema inicia direto na GUI — não abre shell/login.
     // O sistema permanece na área de trabalho até o desligamento.
     loop {
@@ -296,7 +244,7 @@ fn embedded_initramfs(boot_info: &boot_info::BootInfo) -> Option<&'static [u8]> 
 }
 
 fn load_global_config() {
-    if let Some(settings) = ramfs::read(config::GLOBAL_CONFIG_PATH) {
+    if let Some(settings) = ramfs::read(crate::distro::DISTRO_CONFIG_PATH) {
         if config::load(settings).is_err() {
             console_write("Global configuration invalid; using defaults\n");
         }

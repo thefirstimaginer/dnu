@@ -1,4 +1,4 @@
-//! Minimal PS/2 mouse driver for the ImagineOS display server.
+//! Minimal PS/2 mouse driver for the DNU display server.
 //!
 //! The controller's second PS/2 port (the auxiliary device) is polled, not
 //! interrupt driven: there is no IRQ plumbing for it here yet. The display

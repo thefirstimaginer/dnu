@@ -48,13 +48,14 @@ RAMFS_INSTALLED := $(BUILD_DIR)/initramfs-installed.tar
 # ABI (dona do formato DEF). O kernel a consome como crate do workspace; as
 # ferramentas de host, compiladas por `rustc` direto, a enxergam pelo bundle
 # gerado por `tools/abi-bundle.sh` (ver `tools/abi.rs`).
-ABI_MANIFEST := $(ROOT)/abi/imagineos_abi/Cargo.toml
+# O Makefile está em dnu/, então sobe um nível para alcançar imagine-base/.
+ABI_MANIFEST := $(ROOT)/../imagine-base/abi/Cargo.toml
 ABI_BUNDLE   := $(BUILD_DIR)/tools/imagineos_abi_bundle.rs
 ABI_VERSION  := $(shell sed -n 's/^pub const ABI_VERSION: u64 = \([0-9][0-9]*\).*/\1/p' \
-                    $(ROOT)/abi/imagineos_abi/src/lib.rs)
+                    $(ROOT)/../imagine-base/abi/src/lib.rs)
 
 # O kernel é uma árvore plana em src/ (cada módulo-hub declara suas folhas).
-KERNEL_SOURCES := $(shell find $(ROOT)/src $(ROOT)/abi/imagineos_abi/src -name '*.rs' 2>/dev/null)
+KERNEL_SOURCES := $(shell find $(ROOT)/src $(ROOT)/../imagine-base/abi/src -name '*.rs' 2>/dev/null)
 FONT := $(ROOT)/src/assets/zap-vga16.psf
 
 # Cada arquivo de tests/ é um harness `rustc --test` no host.
@@ -87,9 +88,10 @@ check:
 # ------------------------------------------------------------------------------
 tools: abi $(DZIMAGE_BIN) $(DNU_PACK_BIN) $(DNULINK_BIN) $(DFS_IMAGE_BIN)
 
-$(DZIMAGE_BIN): $(ROOT)/dzimage.rs
+$(DZIMAGE_BIN): $(ROOT)/tools/dzimage_host.rs $(ROOT)/src/dzimage.rs
 	@mkdir -p $(BUILD_DIR)
-	$(CARGO_RUSTC) --edition 2021 -C panic=abort $< -o $@
+	$(CARGO_RUSTC) --edition 2021 --crate-type bin --crate-name dzimage \
+		-C panic=abort $< -o $@
 
 # O `dfs-image` inclui a leitura do dzImage (`read_entries`) para semear o
 # disco a partir do próprio contêiner, sem um initramfs paralelo. Ele define os
@@ -103,9 +105,9 @@ $(DFS_IMAGE_BIN): $(ROOT)/tools/dfs-image.rs $(ROOT)/src/block.rs \
 
 # A validação da ABI é o `cargo check` do próprio crate no host, que compila
 # `lib.rs` e os módulos como o kernel os vê.
-abi: $(ABI_MANIFEST) $(wildcard $(ROOT)/abi/imagineos_abi/src/*.rs)
+abi: $(ABI_MANIFEST) $(wildcard $(ROOT)/../imagine-base/abi/src/*.rs)
 	@mkdir -p $(BUILD_DIR)/tools
-	$(ROOT)/tools/abi-bundle.sh $(ROOT)/abi/imagineos_abi $(ABI_BUNDLE)
+	$(ROOT)/tools/abi-bundle.sh $(ROOT)/../imagine-base/abi $(ABI_BUNDLE)
 	$(CARGO) check --manifest-path $(ABI_MANIFEST) --lib --target $(HOST_TRIPLE) \
 		--config 'profile.release.panic="unwind"'
 

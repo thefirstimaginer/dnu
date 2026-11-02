@@ -1,7 +1,7 @@
 //! Formato **DEF** (Dreamcore Executable Format) — o contêiner executável
-//! nativo do ImagineOS.
+//! nativo do DNU.
 //!
-//! O DEF é o formato executável nativo do ImagineOS. Ele foi desenhado para
+//! O DEF é o formato executável nativo do DNU. Ele foi desenhado para
 //! ser **zero-copy**: o cabeçalho é uma estrutura de tamanho fixo, alinhada a 8
 //! bytes, lida diretamente dos bytes do arquivo (um `#[repr(C)]` que o loader
 //! do kernel pode sobrepor na página carregada sem copiar nem realocar nada).

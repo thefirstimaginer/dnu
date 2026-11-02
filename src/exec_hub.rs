@@ -11,13 +11,13 @@
 //! `src/` é uma árvore plana: cada módulo-hub declara suas folhas com
 //! `#[path]` relativo a ele.
 
-#[path = "exec_def.rs"]
+#[path = "../exec/exec_def.rs"]
 pub mod def;
-#[path = "exec_descriptors.rs"]
+#[path = "../exec/exec_descriptors.rs"]
 pub mod descriptors;
-#[path = "exec_loader.rs"]
+#[path = "../exec/exec_loader.rs"]
 pub mod loader;
-#[path = "exec_process.rs"]
+#[path = "../exec/exec_process.rs"]
 pub mod process;
-#[path = "exec_space.rs"]
+#[path = "../exec/exec_space.rs"]
 pub mod space;

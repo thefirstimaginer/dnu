@@ -6,9 +6,9 @@
 
 use imagineos_abi::{InstallConfig, MAX_CONSOLE_WRITE, MAX_IO_SIZE, SYS_INSTALL_DISK};
 
-use super::trap::{TrapFrame, EFAULT, EINVAL, ENODEV, ENOENT, EPERM};
+use super::trap::{TrapFrame, EFAULT, EINVAL, ENODEV, EPERM};
 use super::user::{copy_struct_from_user, copy_struct_to_user};
-use crate::{installer, process};
+use crate::process;
 
 /// `getidentity(&UserIdentity)`.
 pub fn identity(frame: &mut TrapFrame) -> *mut TrapFrame {
@@ -116,28 +116,9 @@ pub fn install_disk(frame: &mut TrapFrame) -> *mut TrapFrame {
     if frame.rdi != 0 {
         return frame.fail(ENODEV);
     }
-    let mut config = InstallConfig::default();
-    let with_config = frame.rax == SYS_INSTALL_DISK;
-    if with_config && !copy_struct_from_user(frame.rsi, &mut config) {
-        return frame.fail(EFAULT);
-    }
-    if !with_config || crate::usr::accounts::validate_install_config(&mut config).is_err() {
-        config.password.fill(0);
-        return frame.fail(EINVAL);
-    }
-    let result = installer::install_primary_master(&config);
-    config.password.fill(0);
-    match result {
-        Ok(()) => frame.ok(0),
-        Err(installer::InstallError::NoDisk) => frame.fail(ENODEV),
-        Err(installer::InstallError::DiskTooSmall) => frame.fail(-28),
-        Err(installer::InstallError::MissingPayload) => frame.fail(ENOENT),
-        Err(installer::InstallError::PayloadTooLarge) => frame.fail(-28),
-        Err(installer::InstallError::DfsFormat) => frame.fail(-5),
-        Err(installer::InstallError::InvalidAccountConfig) => frame.fail(EINVAL),
-        Err(installer::InstallError::EntropyUnavailable) => frame.fail(-95),
-        Err(installer::InstallError::Block(_)) => frame.fail(-5),
-    }
+    // Instalação de disco é feita via userspace (dnu-pack/distroinstall),
+    // não diretamente via syscall do kernel.
+    frame.fail(-95) // ENOSYS - operação não suportada diretamente pelo kernel
 }
 
 /// `shutdown_request()`: só root pode pedir desligamento.

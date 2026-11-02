@@ -1,5 +1,5 @@
 //! Alocador de memória baseado em lista vinculada (linked list allocator) para
-//! o kernel do ImagineOS.
+//! o kernel do DNU.
 //!
 //! Este allocador suporta alocação e liberação de memória (`malloc`/`free`),
 //! permitindo o uso de `Box`, `Vec`, `String` e outros tipos que alocam
