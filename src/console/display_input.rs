@@ -9,7 +9,7 @@
 
 use core::cell::UnsafeCell;
 
-use imagineos_abi::{InputEvent, INPUT_KEY, INPUT_MOUSE_BUTTON, INPUT_MOUSE_MOVE};
+use crate::abi::{InputEvent, INPUT_KEY, INPUT_MOUSE_BUTTON, INPUT_MOUSE_MOVE};
 
 const CAPACITY: usize = 128;
 

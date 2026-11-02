@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![allow(missing_docs)]
 // Código de kernel: funções `unsafe fn` usam operações unsafe no corpo por
 // contrato (asm de E/S, voláteis de MMIO). Edition 2024 pede blocos internos;
 // mantemos o estilo legado de contrato-por-função até uma revisão completa.
@@ -9,52 +10,76 @@ use core::panic::PanicInfo;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-// Grafo do kernel: cada `mod` é o arquivo de mesmo nome em `src/` (árvore
-// plana) e os módulos-hub (`usr`, `exec`, `init`, `console`, `arch`) declaram
-// as próprias folhas.
-mod usr_hub;
+// Grafo do kernel: cada `mod` declara suas folhas com #[path] relativo a ele.
+// Apenas main.rs, linker.ld e linker_direct.ld permanecem na raiz de src/.
+#[path = "arch/arch_hub.rs"]
 mod arch_hub;
+#[path = "ipc/ipc.rs"]
 mod ipc;
-mod console_hub;
+#[path = "console/console_hub.rs"]
+mod console;
+#[path = "console/display_input.rs"]
 mod display_input;
 
+#[path = "drivers/drivers_hub.rs"]
 pub mod drivers;
-pub mod block;
-mod boot;
+#[path = "mm/block.rs"]
+mod block;
+#[path = "boot/boot_info.rs"]
 mod boot_info;
+#[path = "boot/dzimage.rs"]
 mod dzimage;
+#[path = "config/distro.rs"]
 mod distro;
-mod gdi;
-mod window;
-mod compositor;
-mod drivers_hub;
-pub mod drivers;
+#[path = "config/config.rs"]
+mod config;
+#[path = "subsystems/subsystems.rs"]
 mod subsystems;
 use subsystems::Subsystem;
+#[path = "fs/dfs.rs"]
 mod dfs;
-#[path = "exec_hub.rs"]
-pub mod exec;
-pub use exec::process;
-#[path = "init_hub.rs"]
+#[path = "boot/boot.rs"]
+mod boot;
+#[path = "process/mod.rs"]
+pub mod process;
+#[path = "drivers/ata.rs"]
+mod ata;
+#[path = "init/init_hub.rs"]
 pub mod init;
-mod console;
+#[path = "arch/fpu.rs"]
 mod fpu;
+#[path = "arch/gdt.rs"]
 mod gdt;
+#[path = "fs/gpt.rs"]
 pub mod gpt;
+#[path = "mm/allocator.rs"]
 mod allocator;
+#[path = "arch/idt.rs"]
 mod idt;
+#[path = "log/kernel_log.rs"]
 pub mod kernel_log;
+#[path = "drivers/keyboard.rs"]
 mod keyboard;
+#[path = "drivers/mouse.rs"]
 pub mod mouse;
-pub mod memory;
+#[path = "mm/memory.rs"]
+mod memory;
+#[path = "mm/paging.rs"]
 mod paging;
+#[path = "subsystems/permissions.rs"]
 mod permissions;
+#[path = "drivers/acpi.rs"]
 mod acpi;
+#[path = "fs/ramfs.rs"]
 mod ramfs;
+#[path = "console/surface.rs"]
 mod surface;
+#[path = "fs/vfs.rs"]
 pub mod vfs;
+#[path = "abi/lib.rs"]
 mod abi;
 
+#[path = "time/time.rs"]
 mod time;
 
 // Reexports dos submódulos de `console` que o resto do kernel referencia pelo
@@ -68,6 +93,13 @@ pub(crate) use console::serial::serial_write;
 pub(crate) use console::serial::write_number as serial_write_number;
 pub(crate) use crate::halt as kernel_halt;
 
+// Nota ELF PVH exigida pelo QEMU para aceitar kernels x86_64 carregados com
+// `-kernel`. Colocada na seção .note.pvh, que o linker_direct.ld mapeia para
+// o segmento PT_NOTE.
+#[unsafe(link_section = ".note.pvh")]
+#[used]
+static PVH_NOTE: [u8; 16] = *b"\x04\x00\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00Xen\0";
+
 static LOG_LINE_START: AtomicBool = AtomicBool::new(true);
 // Fonte PSF embutida no kernel: o dzImage também a leva dentro do initramfs,
 // mas o boot precisa desenhar o console antes de montar a raiz volátil.
@@ -78,6 +110,15 @@ static EMBEDDED_FONT: &[u8] = include_bytes!("assets/zap-vga16.psf");
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     boot::limine_start()
+}
+
+/// Ponto de entrada para boot direto via `dnuboot` (feature `direct-boot`).
+/// Chama `boot::direct_start()`, que monta um `BootInfo` com valores padrão e
+/// lê o initramfs da seção `.initramfs` do binário.
+#[cfg(feature = "direct-boot")]
+#[unsafe(no_mangle)]
+pub extern "C" fn _direct_start() -> ! {
+    boot::direct_start()
 }
 
 #[unsafe(no_mangle)]
@@ -142,11 +183,8 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
 
     // Referência única aos globais de I/O da ABI: mantê-los vivos mesmo quando
     // nenhuma syscall é compilada no binário (builds mínimos/testes).
-    abi::anchor_runtime_state();
     let disk_ready = probe_storage();
     mount_root_filesystems(boot_info, disk_ready);
-    // Inicializa o sistema de contas (tenta carregar users.db de DFS para RAMFS).
-    usr::accounts::init_accounts();
 
     // Lê o nome da distribuição da configuração do RAMFS (se disponível).
     if let Some(settings) = ramfs::read(crate::distro::DISTRO_CONFIG_PATH) {
@@ -200,11 +238,13 @@ fn probe_storage() -> bool {
 
 /// Monta o RAMFS com o membro `initramfs` do `dzImage` e, se houver, o DFS
 /// persistente por cima. Aplica também a configuração global e a fonte PSF da
-/// raiz ativa.
+/// raiz ativa. No boot direto (sem dzImage), o initramfs pode estar ausente;
+/// nesse caso, o sistema continua sem raiz volátil.
 fn mount_root_filesystems(boot_info: &boot_info::BootInfo, disk_ready: bool) {
     let Some(ramfs_image) = embedded_initramfs(boot_info) else {
-        console_write("dzImage has no initramfs member; stopping safely\n");
-        crate::halt();
+        console_write("No initramfs available; continuing without volatile root\n");
+        subsystems::mark_unavailable(Subsystem::Ramfs);
+        return;
     };
     ramfs::mount(ramfs_image);
     ramfs::set_block_disk_present(disk_ready);

@@ -8,7 +8,7 @@
 //! só está acessível se **todos** os diretórios ancestrais permitirem
 //! travessia; e o nó final é avaliado com o próprio modo.
 
-use imagineos_abi::MAX_MUTABLE_PATH;
+use crate::abi::MAX_MUTABLE_PATH;
 
 use crate::process;
 

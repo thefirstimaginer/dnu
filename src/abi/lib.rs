@@ -2,11 +2,33 @@
 
 pub mod def;
 pub mod syscall;
+#[path = "abi_trap.rs"]
+pub mod trap;
+#[path = "input.rs"]
+pub mod input;
+#[path = "abi_display.rs"]
+pub mod display;
+#[path = "abi_access.rs"]
+pub mod access;
+#[path = "abi_console_input.rs"]
+pub mod console_input;
+#[path = "abi_dispatch.rs"]
+pub mod dispatch;
+#[path = "abi_fs.rs"]
+pub mod fs;
+#[path = "abi_process.rs"]
+pub mod process;
+#[path = "abi_system.rs"]
+pub mod system;
+#[path = "abi_thread.rs"]
+pub mod thread;
+#[path = "abi_user.rs"]
+pub mod user;
 
 pub use syscall::*;
 
 pub const ABI_VERSION: u64 = 1; // Não há porque mudar a versão da ABI a cada compilação,
-                                // somente se houver transição de versão estável 
+                                // somente se houver transição de versão estável
                                 // (v1.x -> ABI 1, v2.x ABI 2)
 
 // Limites compartilhados entre kernel, libc C (`dreamcore.h`) e runtime Rust.
@@ -85,7 +107,6 @@ pub struct SurfaceInfo {
     pub address: u64,
 }
 
-/// Eventos dirigidos ao dono de uma superfície.
 pub const SURFACE_EVENT_KEY: u32 = 1;
 pub const SURFACE_EVENT_MOUSE_MOVE: u32 = 2;
 pub const SURFACE_EVENT_MOUSE_BUTTON: u32 = 3;
@@ -182,36 +203,7 @@ pub struct UserArg {
 // ------------------------------------------------------------------------------
 // Tipos de suporte à biblioteca padrão (dnu-std)
 // ------------------------------------------------------------------------------
-/// Descriptor de uma thread criada por `SYS_THREAD_CREATE`.
-///
-/// A thread nova nasce no mesmo espaço de endereço do processo: memória,
-/// descritores e credenciais são compartilhados. O que é próprio de cada thread
-/// é a pilha (de kernel e de usuário) e o estado de FPU/SSE.
-///
-/// `entry` é o endereço da função que a thread começa a executar (recebe
-/// `argument` em `rdi`); ao retornar, o kernel chama `SYS_THREAD_EXIT(0)`
-/// implicitamente. `stack_top` é o topo da pilha de usuário já alocada pelo
-/// chamador (a `std` aloca com `mmap`); `0` significa "o kernel escolhe".
-/// `tls` é o valor gravado em `fs_base` para o TLS da thread (0 = nenhum).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ThreadCreate {
-    /// Função de entrada da thread (`fn(argument)`).
-    pub entry: u64,
-    /// Valor entregue em `rdi` à função de entrada.
-    pub argument: u64,
-    /// Topo da pilha de usuário da thread (0 = o kernel escolhe).
-    pub stack_top: u64,
-    /// Base do TLS da thread, gravada em `fs_base` (0 = não mexe).
-    pub tls: u64,
-}
 
-/// `futex(&word, op, value, &timeout, ...)`: operações suportadas.
-///
-/// O subconjunto abaixo cobre `Mutex` (WAIT/WAKE), `Condvar`/`park` (WAKE com
-/// contagem) e timeouts (`*_BITSET` com um `Timespec`). A semântica é a mesma do
-/// futex do Linux: a espera é **revalidada** sob o bloqueio do escalonador para
-/// não perder um `wake` que chegue entre a leitura de `word` e o bloqueio.
 pub const FUTEX_WAIT: u64 = 0;
 /// `futex(&word, FUTEX_WAKE, count, ...)`: acorda até `count` threads.
 pub const FUTEX_WAKE: u64 = 1;
@@ -253,19 +245,6 @@ pub const PROT_EXEC: u64 = 1 << 2;
 /// Tamanho de uma página de usuário, compartilhado por `mmap`/`munmap`.
 pub const PAGE_SIZE: u64 = 4096;
 
-/// Descrição do bloco TLS montado pelo kernel (`SYS_TLS_INFO`).
-///
-/// O kernel monta o bloco a partir do segmento `PT_TLS` do DEF e grava
-/// `fs_base` (modelo *variant II*: as variáveis ficam em offsets negativos).
-/// `size` é o `p_memsz` do segmento; `0` quando o binário não tem TLS.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct TlsInfo {
-    pub fs_base: u64,
-    pub size: u64,
-    pub alignment: u64,
-}
-
 /// Maior `length` aceito por uma única `mmap`.
 ///
 /// Sem este limite uma chamada com `length = u64::MAX` derrubaria o kernel ao
@@ -274,28 +253,12 @@ pub struct TlsInfo {
 pub const MMAP_MAX_LENGTH: u64 = 64 * 1024 * 1024;
 
 /// Base da região de `mmap` anônimo — logo acima da heap de `sbrk`.
-///
-/// A heap cresce em `USER_HEAP_START` até `USER_HEAP_LIMIT` (64 MiB), então a
-/// região anônima começa depois dela. Fica longe das superfícies
-/// (`SURFACE_REGION_BASE`), da pilha (`0x7fff_ffff_0000`) e do framebuffer
-/// (`0x4000_0000_0000`).
-///
-/// O kernel distribui as regiões em ordem crescente a partir daqui; o
-/// userspace nunca depende de endereços fixos, só do que `mmap` devolve.
 pub const MMAP_REGION_BASE: u64 = 0x0000_0002_0000_0000;
 
 /// Teto da região de `mmap` anônimo (exclusivo).
-///
-/// 256 MiB de espaço virtual: com `MMAP_MAX_LENGTH` = 64 MiB isso comporta
-/// várias alocações simultâneas. Como só as páginas tocadas consomem RAM
-/// física (o mapeamento é sob demanda), o teto é generoso sem custar memória.
 pub const MMAP_REGION_END: u64 = 0x0000_0003_0000_0000;
 
 /// Maior número de threads (além da principal) por processo.
-///
-/// Cada thread consome um slot do escalonador e uma pilha de kernel de 128 KiB
-/// (`KERNEL_STACKS`), então o limite é baixo de propósito. O total de threads
-/// do sistema não passa de `MAX_PROCESSES`.
 pub const MAX_THREADS_PER_PROCESS: usize = 8;
 
 /// Pilha de usuário que o kernel aloca quando `ThreadCreate.stack_top == 0`.
@@ -305,17 +268,6 @@ pub const THREAD_STACK_SIZE: u64 = 128 * 1024;
 /// descriptors. Each field is a descriptor number owned by the *caller*: the
 /// kernel duplicates it into the child, so `0`, `1`, `2` keep meaning
 /// stdin/stdout/stderr. `-1` means "leave it as the default".
-///
-/// This is how a shell sets up a pipeline (`child 1 | child 2`) without a real
-/// `fork`: give the left child `stdout = pipe_write`, the right child
-/// `stdin = pipe_read`, and close the unused ends in the parent afterwards.
-/// Describes how a child created by `SYS_SPAWN` should see its standard
-/// descriptors, and carries the environment for the child.
-///
-/// The six syscall registers are all used by `SYS_SPAWN`, so the environment
-/// (pointer and count) travels inside this structure instead of taking extra
-/// registers. Both fields are `u64` so the layout is identical for the kernel
-/// and for 64-bit userspace.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpawnIo {
@@ -334,12 +286,6 @@ impl SpawnIo {
 }
 
 /// `Default` inherits every descriptor and passes no environment.
-///
-/// A caller that only wants to override one descriptor writes just that field:
-///
-/// ```ignore
-/// SpawnIo { stdout_fd: write_end as i64, ..SpawnIo::default() }
-/// ```
 impl Default for SpawnIo {
     fn default() -> Self {
         Self {
@@ -402,7 +348,7 @@ pub struct InputEvent {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UserStat {
     pub size: u64,
     pub mode: u32,
@@ -504,4 +450,41 @@ impl UserArg {
         address: 0,
         length: 0,
     };
+}
+
+/// Descriptor de uma thread criada por `SYS_THREAD_CREATE`.
+///
+/// A thread nova nasce no mesmo espaço de endereço do processo: memória,
+/// descritores e credenciais são compartilhados. O que é próprio de cada thread
+/// é a pilha (de kernel e de usuário) e o estado de FPU/SSE.
+///
+/// `entry` é o endereço da função que a thread começa a executar (recebe
+/// `argument` em `rdi`); ao retornar, o kernel chama `SYS_THREAD_EXIT(0)`
+/// implicitamente. `stack_top` é o topo da pilha de usuário já alocada pelo
+/// chamador (a `std` aloca com `mmap`); `0` significa "o kernel escolhe".
+/// `tls` é o valor gravado em `fs_base` para o TLS da thread (0 = nenhum).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ThreadCreate {
+    /// Função de entrada da thread (`fn(argument)`).
+    pub entry: u64,
+    /// Valor entregue em `rdi` à função de entrada.
+    pub argument: u64,
+    /// Topo da pilha de usuário da thread (0 = o kernel escolhe).
+    pub stack_top: u64,
+    /// Base do TLS da thread, gravada em `fs_base` (0 = não mexe).
+    pub tls: u64,
+}
+
+/// Descrição do bloco TLS montado pelo kernel (`SYS_TLS_INFO`).
+///
+/// O kernel monta o bloco a partir do segmento `PT_TLS` do DEF e grava
+/// `fs_base` (modelo *variant II*: as variáveis ficam em offsets negativos).
+/// `size` é o `p_memsz` do segmento; `0` quando o binário não tem TLS.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TlsInfo {
+    pub fs_base: u64,
+    pub size: u64,
+    pub alignment: u64,
 }

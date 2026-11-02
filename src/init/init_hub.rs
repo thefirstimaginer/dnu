@@ -4,5 +4,5 @@
 //! proteção do supervisor tenha um dono claro: a camada de ABI consulta estas
 //! funções em vez de comparar `pid == 1` em cada handler.
 
-#[path = "../protection.rs"]
+#[path = "protection.rs"]
 pub mod protection;

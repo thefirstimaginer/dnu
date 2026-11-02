@@ -44,7 +44,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use imagineos_abi::{
+use crate::abi::{
     CLOCK_MONOTONIC, CLOCK_REALTIME, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET,
     MAP_ANONYMOUS, MAP_FIXED, MMAP_MAX_LENGTH, MMAP_REGION_BASE, MMAP_REGION_END, PAGE_SIZE,
     PROT_EXEC, PROT_READ, PROT_WRITE, ThreadCreate, Timespec,
@@ -52,7 +52,7 @@ use imagineos_abi::{
 
 use super::trap::{EAGAIN, EFAULT, EINVAL, ENOMEM, ENOSYS, TrapFrame};
 use super::user::{copy_struct_from_user, copy_struct_to_user};
-use crate::exec::process::{self, Mapping};
+use crate::process::{self, Mapping};
 
 // ---------------------------------------------------------------------------
 // Utilitários de tempo
@@ -250,7 +250,7 @@ pub fn futex(frame: &mut TrapFrame) -> *mut TrapFrame {
             let bitset = if operation == FUTEX_WAKE_BITSET {
                 frame.r8 as u64
             } else {
-                imagineos_abi::FUTEX_BITSET_MATCH_ANY
+                crate::abi::FUTEX_BITSET_MATCH_ANY
             };
             // No Linux, `FUTEX_WAKE` com `val == 0` acorda **todas** as threads
             // da palavra; `usize::MAX` traduz isso para o escalonador.
@@ -328,7 +328,7 @@ pub fn set_tls(frame: &mut TrapFrame) -> *mut TrapFrame {
 /// `size == 0` e a musl funciona sem `pthread_create` de TLS.
 pub fn tls_info(frame: &mut TrapFrame) -> *mut TrapFrame {
     let (fs_base, size, alignment) = process::current_tls_info();
-    let info = imagineos_abi::TlsInfo {
+    let info = crate::abi::TlsInfo {
         fs_base,
         size,
         alignment,

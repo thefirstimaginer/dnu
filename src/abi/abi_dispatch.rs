@@ -4,7 +4,7 @@
 //! `match` abaixo é a única tabela de roteamento — os handlers não se chamam
 //! entre si, então um teste do crate pode cobrir uma área sem tocar nas outras.
 
-use imagineos_abi::{
+use crate::abi::{
     SYS_ABI_VERSION, SYS_AUTHENTICATE, SYS_CLEAR, SYS_CLOCK_GETTIME, SYS_CLOSE, SYS_CONSOLE_RELEASE,
     SYS_DISK_COUNT, SYS_DISK_SECTORS, SYS_DMESG, SYS_DUP, SYS_DUP2, SYS_EXEC, SYS_EXECVE, SYS_EXIT,
     SYS_FB_INFO, SYS_FB_MAP, SYS_FORK, SYS_FSTAT, SYS_FUTEX, SYS_GETIDENTITY, SYS_GETPID,
@@ -138,7 +138,7 @@ fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
         SYS_SURFACE_MOVE => display::surface_move(frame),
 
         // --- sistema: identidade, tempo, disco, energia, instalação -------
-        SYS_ABI_VERSION => frame.ok(imagineos_abi::ABI_VERSION),
+        SYS_ABI_VERSION => frame.ok(crate::abi::ABI_VERSION),
         SYS_GETIDENTITY => system::identity(frame),
         SYS_SYSTEM_INFO => system::system_info(frame),
         SYS_GETTIMEOFDAY => system::gettimeofday(frame),

@@ -4,6 +4,13 @@
 //! `_start`) e o próprio arquivo `dzImage`, que a tabela de membros
 //! ([`crate::dzimage`]) usa para encontrar o `initramfs`. Aqui montamos o
 //! [`BootInfo`] que o resto do kernel espera.
+//!
+//! Além do caminho via Limine (`limine_start`), este módulo oferece
+//! `direct_start`, usado pelo `dnuboot` para bootar o `dzImage` sem ISO nem
+//! bootloader externo. Nesse caminho, as estruturas do `BootInfo` são montadas
+//! com valores padrão e o kernel ELF + initramfs são carregados diretamente na
+//! memória por um pequeno stub de boot (veja `tools/dnuboot/`).
+#![allow(missing_docs)]
 
 use core::arch::asm;
 use core::mem::MaybeUninit;
@@ -16,6 +23,15 @@ use limine::request::{
 use limine::response::{FramebufferResponse, MemoryMapResponse, ModuleResponse};
 
 use crate::boot_info::{BootInfo, PhysicalRange, MAX_RESERVED_RANGES};
+
+unsafe extern "C" {
+    static _initramfs_start: u8;
+    static _initramfs_end: u8;
+}
+
+struct BootInfoStorage(core::cell::UnsafeCell<MaybeUninit<BootInfo>>);
+unsafe impl Sync for BootInfoStorage {}
+static BOOT_INFO: BootInfoStorage = BootInfoStorage(core::cell::UnsafeCell::new(MaybeUninit::uninit()));
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -37,10 +53,6 @@ static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
 static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 
 static EMPTY_RESERVED: [PhysicalRange; 1] = [PhysicalRange::EMPTY];
-
-struct BootInfoStorage(core::cell::UnsafeCell<MaybeUninit<BootInfo>>);
-unsafe impl Sync for BootInfoStorage {}
-static BOOT_INFO: BootInfoStorage = BootInfoStorage(core::cell::UnsafeCell::new(MaybeUninit::uninit()));
 
 /// Nome do módulo que o `limine.conf` do dzImage passa ao Limine.
 const DZIMAGE_MODULE: &[u8] = b"dzImage";
@@ -64,6 +76,16 @@ pub fn framebuffer_response() -> Option<&'static limine::response::FramebufferRe
 unsafe fn out(port: u16, value: u8) {
     asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
 }
+
+/// HHDM offset padrão usado no boot direto. Em endereço baixo (identity-mapped)
+/// é zero, pois não há tradução de endereços.
+const DIRECT_HHDM_OFFSET: u64 = 0;
+
+/// Endereço físico onde o `dnuboot` carrega o initramfs no boot direto.
+const DIRECT_INITRAMFS_ADDR: u64 = 0x0000_1000_0000_0000;
+
+/// Tamanho máximo da região de RAM reportada no boot direto.
+const DIRECT_MEMORY_SIZE: u64 = 512 * 1024 * 1024; // 512 MiB
 
 /// Coleta as respostas do Limine e transfere o controle para `kernel_entry`.
 pub fn limine_start() -> ! {
@@ -104,7 +126,7 @@ pub fn limine_start() -> ! {
         core::slice::from_raw_parts(dzimage.addr(), dzimage.size() as usize)
     };
     crate::serial_write(b"boot: dzImage bytes mapped\r\n");
-    if let Err(error) = crate::dzimage::verify(dzimage_bytes, imagineos_abi::ABI_VERSION) {
+    if let Err(error) = crate::dzimage::verify(dzimage_bytes, crate::abi::ABI_VERSION) {
         crate::serial_write(b"boot: dzImage verify FAILED\r\n");
         panic!("dzImage failed verification: {error:?}");
     }
@@ -147,6 +169,85 @@ pub fn limine_start() -> ! {
     };
     let boot_info_pointer = unsafe { (*BOOT_INFO.0.get()).write(boot_info) as *const BootInfo };
     crate::kernel_entry(boot_info_pointer)
+}
+
+/// Inicialização de boot direto (sem Limine).
+///
+/// Usado pelo `dnuboot`: constrói um [`BootInfo`] com valores padrão e chama
+/// [`crate::kernel_entry`]. O initramfs é lido dos símbolos
+/// `_binary_initramfs_tar_start` / `_binary_initramfs_tar_end` (definidos pelo
+/// `dnuboot` via `objcopy -I binary` e vinculados ao binário de boot).
+pub fn direct_start() -> ! {
+    crate::console::serial::init();
+    crate::serial_write(b"boot: entering direct_start\r\n");
+
+    let initramfs_start = unsafe { &_initramfs_start as *const u8 };
+    let initramfs_end = unsafe { &_initramfs_end as *const u8 };
+    let initramfs_size = initramfs_end as usize - initramfs_start as usize;
+
+    let reserved: &[PhysicalRange] = &EMPTY_RESERVED;
+
+    let tsc_start = crate::time::read_tsc();
+    let tsc_frequency = crate::time::cpuid_tsc_frequency()
+        .or_else(crate::time::calibrate_tsc)
+        .unwrap_or(0);
+
+    // Monta um ModuleResponse mínimo apontando para o initramfs. O kernel
+    // procura pelo módulo chamado "dzImage" e lê seus bytes como o contêiner
+    // dzImage, do qual extrai o initramfs. No boot direto, o próprio initramfs
+    // (tar USTAR) é colocado como payload de um módulo sintético.
+    let mut module_response = DirectModuleResponse {
+        modules: [DirectModule {
+            path: [0; 128],
+            pad: [0; 32],
+            addr: initramfs_start as u64,
+            size: initramfs_size as u64,
+        }],
+        count: 1,
+    };
+
+    // Copiar "dzImage" para o path do módulo
+    let path_bytes = b"dzImage";
+    let module_path = unsafe { &mut module_response.modules[0].path as *mut [u8; 128] };
+    unsafe {
+        let len = path_bytes.len().min(128);
+        core::ptr::copy_nonoverlapping(path_bytes.as_ptr(), (*module_path).as_mut_ptr(), len);
+    }
+
+    let boot_info = BootInfo {
+        memory_map: ptr::null(), // sem memory map do Limine; valores default
+        framebuffer: ptr::null(),
+        modules: &module_response as *const DirectModuleResponse as *const ModuleResponse,
+        rsdp_address: 0,
+        hhdm_offset: DIRECT_HHDM_OFFSET,
+        tsc_start,
+        tsc_frequency,
+        reserved_ranges: reserved.as_ptr(),
+        reserved_count: reserved.len(),
+        dzimage: initramfs_start,
+        dzimage_size: initramfs_size,
+    };
+    let boot_info_pointer = unsafe { (*BOOT_INFO.0.get()).write(boot_info) as *const BootInfo };
+    crate::kernel_entry(boot_info_pointer)
+}
+
+/// Módulo sintético para o boot direto. Espelha os campos de `limine::response::Module`.
+/// Resposta de módulos sintética para o boot direto.
+#[repr(C)]
+#[allow(missing_docs)]
+struct DirectModule {
+    path: [u8; 128],
+    pad: [u8; 32],
+    addr: u64,
+    size: u64,
+}
+
+/// Resposta de módulos sintética para o boot direto.
+#[repr(C)]
+#[allow(missing_docs)]
+struct DirectModuleResponse {
+    modules: [DirectModule; 1],
+    count: usize,
 }
 
 // Mantém o tamanho máximo referenciado (o array de reserva é fixo).

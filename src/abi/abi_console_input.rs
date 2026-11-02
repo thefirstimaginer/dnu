@@ -11,7 +11,7 @@ use core::cell::UnsafeCell;
 
 use super::display::KEYBOARD;
 use crate::framebuffer;
-use crate::exec::process;
+use crate::process;
 
 pub(super) struct SharedDecoder(UnsafeCell<crate::utf8::Decoder>);
 unsafe impl Sync for SharedDecoder {}
@@ -49,7 +49,7 @@ pub fn read_character() -> u32 {
             }
             framebuffer::set_cursor_visible(false);
             if character == crate::keyboard::KEY_INTERRUPT {
-                let _ = process::send_signal(process::current_pid(), imagineos_abi::SIGNAL_INT);
+                let _ = process::send_signal(process::current_pid(), crate::abi::SIGNAL_INT);
                 return b'\n' as u32;
             }
             return character as u32;
@@ -57,7 +57,7 @@ pub fn read_character() -> u32 {
         if let Some(character) = serial_character() {
             framebuffer::set_cursor_visible(false);
             if character == '\u{3}' {
-                let _ = process::send_signal(process::current_pid(), imagineos_abi::SIGNAL_INT);
+                let _ = process::send_signal(process::current_pid(), crate::abi::SIGNAL_INT);
                 return b'\n' as u32;
             }
             return character as u32;

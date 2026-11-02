@@ -7,7 +7,7 @@
 
 use core::cell::UnsafeCell;
 
-use imagineos_abi::{
+use crate::abi::{
     FramebufferInfo, InputEvent, SurfaceEvent, SurfaceInfo, SurfaceSnapshot, MAX_SURFACES,
 };
 
@@ -21,13 +21,13 @@ use crate::keyboard::Keyboard;
 // mútua é feita desabilitando interrupções durante a leitura (ver `input`).
 pub(crate) struct SharedKeyboard(UnsafeCell<Keyboard>);
 unsafe impl Sync for SharedKeyboard {}
-pub(crate) static KEYBOARD: SharedKeyboard =
+pub static KEYBOARD: SharedKeyboard =
     SharedKeyboard(UnsafeCell::new(Keyboard::new()));
 
 impl SharedKeyboard {
     /// Estado global do teclado; o chamador deve desabilitar interrupções.
-    pub fn get(&self) -> *mut Keyboard {
-        self.0.get()
+    pub fn get(&self) -> &mut Keyboard {
+        unsafe { &mut *self.0.get() }
     }
 }
 

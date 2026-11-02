@@ -10,9 +10,9 @@ use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-#[path = "src/dzimage.rs"]
+#[path = "../src/boot/dzimage.rs"]
 mod dzimage;
-#[path = "src/util/mod.rs"]
+#[path = "../src/util/mod.rs"]
 mod util;
 
 use dzimage::{
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(members[0].payload(&image), ELF);
         assert_eq!(members[1].kind, KIND_INITRAMFS);
         assert_eq!(members[1].payload(&image), INITRAMFS);
-        assert!(dzimage::HEADER_SIZE < members[0].offset, "payloads follow the table");
+        assert!(dzimage::HEADER_SIZE < members[0].offset as usize, "payloads follow the table");
         assert_eq!(members[0].offset % 8, 0, "payloads are 8-byte aligned");
         assert_eq!(members[1].offset % 8, 0, "payloads are 8-byte aligned");
     }

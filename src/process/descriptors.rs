@@ -8,9 +8,9 @@
 
 use core::cell::UnsafeCell;
 
-const MAX_PROCESSES: usize = imagineos_abi::MAX_PROCESSES;
+const MAX_PROCESSES: usize = crate::abi::MAX_PROCESSES;
 
-pub const MAX_OPEN_FDS: usize = imagineos_abi::MAX_OPEN_FDS;
+pub const MAX_OPEN_FDS: usize = crate::abi::MAX_OPEN_FDS;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DescriptorKind {
@@ -28,7 +28,7 @@ pub enum DescriptorKind {
 #[derive(Clone, Copy)]
 pub struct Descriptor {
     pub kind: DescriptorKind,
-    pub path: [u8; imagineos_abi::MAX_MUTABLE_PATH],
+    pub path: [u8; crate::abi::MAX_MUTABLE_PATH],
     pub path_length: usize,
     pub offset: usize,
     pub flags: u64,
@@ -45,7 +45,7 @@ impl Descriptor {
     const fn new(kind: DescriptorKind) -> Self {
         Self {
             kind,
-            path: [0; imagineos_abi::MAX_MUTABLE_PATH],
+            path: [0; crate::abi::MAX_MUTABLE_PATH],
             path_length: 0,
             offset: 0,
             flags: 0,
@@ -164,7 +164,7 @@ pub fn release_all(slot: usize) {
 pub fn apply_spawn_io(
     child: &mut Table,
     parent_slot: usize,
-    io: &imagineos_abi::SpawnIo,
+    io: &crate::abi::SpawnIo,
 ) {
     let parent = *table(parent_slot);
     let slots = [
@@ -173,7 +173,7 @@ pub fn apply_spawn_io(
         (2usize, io.stderr_fd),
     ];
     for (target, source) in slots {
-        if source == imagineos_abi::SpawnIo::INHERIT {
+        if source == crate::abi::SpawnIo::INHERIT {
             continue;
         }
         let Ok(source) = usize::try_from(source) else {
@@ -205,7 +205,7 @@ pub fn clone_table(parent_slot: usize, child_slot: usize) {
 ///
 /// Deliberadamente **não** herda os fds altos do pai (close-on-exec): herdar
 /// fazia cada filho manter referências extras de pipe e `ls | cat` travava.
-pub fn prepare_spawn_table(child_slot: usize, parent_slot: usize, io: &imagineos_abi::SpawnIo) {
+pub fn prepare_spawn_table(child_slot: usize, parent_slot: usize, io: &crate::abi::SpawnIo) {
     let child = table(child_slot);
     *child = Table::new();
     apply_spawn_io(child, parent_slot, io);

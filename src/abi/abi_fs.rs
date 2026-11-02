@@ -1,6 +1,6 @@
 //! Syscalls de arquivos e descritores.
 //!
-//! Convenção de argumentos (ver `imagineos_abi::syscall`):
+//! Convenção de argumentos (ver `crate::abi::syscall`):
 //!
 //! * `open(path, len, flags, mode)` — `rdi/rsi/rdx/r10`;
 //! * `read_fd(fd, buf, count)` / `write_fd(fd, buf, count)` — `rdi/rsi/rdx`;
@@ -10,10 +10,10 @@
 //!
 //! Cada handler valida limites, confere permissões e só então toca o VFS.
 
-use imagineos_abi::{
+use crate::abi::{
     OPEN_APPEND, OPEN_CREATE, OPEN_EXCLUSIVE, OPEN_READ, OPEN_TRUNCATE, OPEN_WRITE, SYS_MKDIR,
 };
-use imagineos_abi::{MAX_IO_SIZE, MAX_MUTABLE_PATH, MAX_PATH_QUERY, UserStat};
+use crate::abi::{MAX_IO_SIZE, MAX_MUTABLE_PATH, MAX_PATH_QUERY, UserStat};
 
 use super::access;
 use super::trap::{
@@ -386,20 +386,20 @@ pub fn write_file(frame: &mut TrapFrame) -> *mut TrapFrame {
     if !allowed {
         return frame.fail(EACCES);
     }
-    let mut contents = [0u8; imagineos_abi::MAX_WRITE_FILE_SIZE];
+    let mut contents = [0u8; crate::abi::MAX_WRITE_FILE_SIZE];
     if !process::copy_from_current_user(frame.rdx, &mut contents[..length]) {
         return frame.fail(EFAULT);
     }
-    if crate::usr::config::is_global_config_path(path)
-        && crate::usr::config::validate(&contents[..length]).is_err()
+    if crate::config::is_global_config_path(path)
+        && crate::config::validate(&contents[..length]).is_err()
     {
         return frame.fail(EINVAL);
     }
     let (uid, gid, _) = process::current_credentials();
     match crate::ramfs::write_file_as(path, &contents[..length], uid, gid) {
         Ok(()) => {
-            if crate::usr::config::is_global_config_path(path) {
-                let _ = crate::usr::config::load(&contents[..length]);
+            if crate::config::is_global_config_path(path) {
+                let _ = crate::config::load(&contents[..length]);
             }
             frame.ok(length as u64)
         }
@@ -495,7 +495,7 @@ fn read_stdin(
     if descriptor.input_offset == descriptor.input_length {
         let mut encoded = [0u8; 4];
         let character = super::input::read_character();
-        let value = char::from_u32(character).unwrap_or('\u{fffd}');
+        let value = character;
         let bytes = value.encode_utf8(&mut encoded).as_bytes();
         descriptor.input[..bytes.len()].copy_from_slice(bytes);
         descriptor.input_length = bytes.len();

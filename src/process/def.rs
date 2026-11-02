@@ -6,7 +6,7 @@
 //! como saída intermediária do toolchain, convertida por `dnu-pack`.
 //!
 //! A estrutura de bytes do cabeçalho está documentada (e compartilhada com a
-//! ferramenta `dnu-pack`) em `imagineos_abi::def`. Aqui ficam apenas as leituras
+//! ferramenta `dnu-pack`) em `crate::abi::def`. Aqui ficam apenas as leituras
 //! defensivas — sem pânico, com aritmética checada — que o kernel precisa para
 //! tratar um arquivo potencialmente malformado como um `Err` em vez de um
 //! travamento.
@@ -31,7 +31,7 @@
 //!   152 .. tabela de segmentos (DEF_SEGMENT_SIZE cada)
 //! ```
 
-use imagineos_abi::def::{
+use crate::abi::def::{
     DEF_FORMAT_VERSION, DEF_HEADER_SIZE, DEF_MAGIC, DEF_MAX_SEGMENTS, DEF_SEGMENT_SIZE, DefArch,
     DefPermissions,
 };
@@ -104,14 +104,14 @@ impl<'a> Def<'a> {
         if arch != DefArch::NATIVE {
             return Err(Error::UnsupportedArch);
         }
-        if imagineos_abi::def::DefType::from_u8(bytes[5]).is_none() {
+        if crate::abi::def::DefType::from_u8(bytes[5]).is_none() {
             return Err(Error::UnsupportedFormat);
         }
         if read_u16(bytes, 6)? != DEF_FORMAT_VERSION {
             return Err(Error::UnsupportedFormat);
         }
         let abi_version = read_u32(bytes, 8)? as u64;
-        if abi_version > imagineos_abi::ABI_VERSION {
+        if abi_version > crate::abi::ABI_VERSION {
             return Err(Error::IncompatibleAbi);
         }
         let segment_count = read_u32(bytes, 16)?;
@@ -206,7 +206,7 @@ impl<'a> Def<'a> {
             file_offset,
             file_size,
             permissions,
-            is_tls: reserved & imagineos_abi::def::DEF_SEGMENT_TLS != 0,
+            is_tls: reserved & crate::abi::def::DEF_SEGMENT_TLS != 0,
         }))
     }
 
@@ -271,7 +271,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, Error> {
 #[cfg(test)]
 mod tests {
     use super::{Def, Error};
-    use imagineos_abi::def::{
+    use crate::abi::def::{
         DEF_FORMAT_VERSION, DEF_HEADER_SIZE, DEF_MAGIC, DEF_SEGMENT_SIZE, DefArch, DefPermissions,
         DefType,
     };
@@ -284,7 +284,7 @@ mod tests {
         bytes[4] = DefArch::X86_64 as u8;
         bytes[5] = DefType::App as u8;
         bytes[6..8].copy_from_slice(&DEF_FORMAT_VERSION.to_le_bytes());
-        bytes[8..12].copy_from_slice(&(imagineos_abi::ABI_VERSION as u32).to_le_bytes());
+        bytes[8..12].copy_from_slice(&(crate::abi::ABI_VERSION as u32).to_le_bytes());
         bytes[16..20].copy_from_slice(&1u32.to_le_bytes()); // segment_count
         bytes[24..32].copy_from_slice(&0x400000u64.to_le_bytes()); // entry_point
         bytes[32..40].copy_from_slice(&(32u64 * 4096).to_le_bytes()); // stack_size
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn rejects_newer_abi() {
         let mut bytes = valid_def();
-        let abi = (imagineos_abi::ABI_VERSION as u32) + 1;
+        let abi = (crate::abi::ABI_VERSION as u32) + 1;
         bytes[8..12].copy_from_slice(&abi.to_le_bytes());
         assert!(matches!(Def::parse(&bytes), Err(Error::IncompatibleAbi)));
     }

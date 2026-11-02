@@ -1,6 +1,6 @@
 use core::arch::asm;
 
-use crate::usr::config::KeyboardLayout;
+use crate::config::KeyboardLayout;
 
 const KEY_UP: char = '\u{f0000}';
 const KEY_DOWN: char = '\u{f0001}';
@@ -80,7 +80,7 @@ impl Keyboard {
                 return Some(KEY_INTERRUPT);
             }
 
-            let layout = crate::usr::config::keyboard_layout();
+            let layout = crate::config::keyboard_layout();
             let character = translate(
                 key,
                 self.left_shift || self.right_shift,
@@ -334,7 +334,7 @@ fn compose_dead_key(dead_key: char, character: char) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::{compose_dead_key, translate};
-    use crate::usr::config::KeyboardLayout;
+    use crate::config::KeyboardLayout;
 
     #[test]
     fn abnt2_maps_portuguese_keys_and_dead_key_compositions() {

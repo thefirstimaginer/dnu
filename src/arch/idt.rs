@@ -222,7 +222,7 @@ unsafe extern "C" {
 /// the frame to resume on top of the iretq instruction.
 #[unsafe(no_mangle)]
 extern "C" fn dreamcore_timer_dispatch(frame: *mut crate::abi::trap::TrapFrame) -> *mut crate::abi::trap::TrapFrame {
-    crate::arch::x86_64::timer::handle_interrupt(frame)
+    crate::arch_hub::x86_64::timer::handle_interrupt(frame)
 }
 
 

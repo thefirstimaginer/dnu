@@ -5,7 +5,7 @@
 //! absurdo. Os helpers abaixo falham com o errno correspondente em vez de
 //! deixar o kernel tocar memória arbitrária.
 
-use imagineos_abi::{UserArg, MAX_MUTABLE_PATH, MAX_PATH_QUERY};
+use crate::abi::{UserArg, MAX_MUTABLE_PATH, MAX_PATH_QUERY};
 
 use super::trap::{E2BIG, EFAULT, EINVAL};
 use crate::process;
@@ -176,7 +176,7 @@ impl<'a, const STORAGE: usize> core::ops::Deref for Vector<'a, STORAGE> {
 // de corromper a memória em tempo de execução.
 #[cfg(test)]
 mod layout {
-    use imagineos_abi::{
+    use crate::abi::{
         FramebufferInfo, InputEvent, SurfaceEvent, SurfaceInfo, SurfaceSnapshot, UserArg, UserIdentity,
         UserStat,
     };

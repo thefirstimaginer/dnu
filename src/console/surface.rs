@@ -18,7 +18,7 @@
 
 use core::cell::UnsafeCell;
 
-use imagineos_abi::{
+use crate::abi::{
     SurfaceEvent, SurfaceInfo, MAX_SURFACES, SURFACE_EVENT_HIDDEN, SURFACE_MAX_PIXELS,
 };
 
@@ -108,7 +108,7 @@ struct Surfaces {
     /// PID do servidor de display (o que chamou `SYS_CONSOLE_RELEASE`).
     server_pid: usize,
     /// Fila de eventos por dono de superfície (indexada por slot de processo).
-    events: [ClientEvents; imagineos_abi::MAX_PROCESSES],
+    events: [ClientEvents; crate::abi::MAX_PROCESSES],
 }
 
 struct SharedSurfaces(UnsafeCell<Surfaces>);
@@ -124,7 +124,7 @@ static SURFACES: SharedSurfaces = SharedSurfaces(UnsafeCell::new(Surfaces {
     dirty_tail: 0,
     dirty_length: 0,
     server_pid: 0,
-    events: [ClientEvents::EMPTY; imagineos_abi::MAX_PROCESSES],
+    events: [ClientEvents::EMPTY; crate::abi::MAX_PROCESSES],
 }));
 
 fn surfaces() -> &'static mut Surfaces {
@@ -142,8 +142,8 @@ pub const ENOENT: i64 = -2;
 pub fn create(info: &mut SurfaceInfo) -> Result<(), i64> {
     if info.width == 0
         || info.height == 0
-        || info.width > imagineos_abi::SURFACE_MAX_WIDTH
-        || info.height > imagineos_abi::SURFACE_MAX_HEIGHT
+        || info.width > crate::abi::SURFACE_MAX_WIDTH
+        || info.height > crate::abi::SURFACE_MAX_HEIGHT
     {
         return Err(EINVAL);
     }
@@ -163,7 +163,7 @@ pub fn create(info: &mut SurfaceInfo) -> Result<(), i64> {
     }
     // Mapeia no espaço do chamador, em fatia fixa por id.
     let client_address =
-        imagineos_abi::SURFACE_REGION_BASE + (slot as u64) * imagineos_abi::SURFACE_REGION_STRIDE;
+        crate::abi::SURFACE_REGION_BASE + (slot as u64) * crate::abi::SURFACE_REGION_STRIDE;
     let _ = crate::kernel_log::append(b"surface: create enter\n");
     let mapped = crate::process::with_current_space(|space| {
         space.map_framebuffer_range(
@@ -289,7 +289,7 @@ pub fn release_pid(pid: usize) {
             surfaces.slots[slot] = Surface::EMPTY;
         }
     }
-    surfaces.events[pid % imagineos_abi::MAX_PROCESSES] = ClientEvents::EMPTY;
+    surfaces.events[pid % crate::abi::MAX_PROCESSES] = ClientEvents::EMPTY;
 }
 
 fn dirty(surface_id: u32) {
@@ -317,7 +317,7 @@ pub fn take_dirty() -> Option<u32> {
 
 /// Snapshot de uma superfície para o compositor desenhar (formato da ABI,
 /// já com o buffer mapeado no espaço do servidor).
-pub type Snapshot = imagineos_abi::SurfaceSnapshot;
+pub type Snapshot = crate::abi::SurfaceSnapshot;
 
 /// Lista as superfícies visíveis e mapeia os buffers no processo atual (o
 /// servidor de display). Devolve a quantidade preenchida.
@@ -379,7 +379,7 @@ pub fn push_event_for(pid: usize, event: SurfaceEvent) {
 }
 
 fn imagineas_max() -> usize {
-    imagineos_abi::MAX_PROCESSES
+    crate::abi::MAX_PROCESSES
 }
 
 /// Entrega um evento ao dono da superfície indicada.

@@ -53,9 +53,7 @@ impl InputDevice for KeyboardDevice {
     fn poll(&self) -> Option<Event> {
         let interrupts_were_enabled =
             crate::abi::input::disable_interrupts();
-        let polled = unsafe {
-            (&mut *crate::abi::display::KEYBOARD.get()).poll_char()
-        };
+        let polled = crate::abi::display::KEYBOARD.get().poll_char();
         crate::abi::input::restore_interrupts(interrupts_were_enabled);
         polled.map(Event::Char)
     }

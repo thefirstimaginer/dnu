@@ -11,7 +11,7 @@ use core::ptr;
 use crate::paging::AddressSpace;
 
 use super::loader::LoadError;
-use super::process::{PAGE_SIZE, SCHEDULER};
+use super::{PAGE_SIZE, SCHEDULER};
 
 /// Executa `operation` com o espaço de endereço do processo atual.
 pub fn with_current<T>(operation: impl FnOnce(AddressSpace) -> T) -> T {

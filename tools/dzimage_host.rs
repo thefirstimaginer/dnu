@@ -7,7 +7,7 @@
 
 //! Compilação como crate standalone com std.
 //! Re-exporta o módulo dzimage para uso como binário.
-#[path = "../src/dzimage.rs"]
+#[path = "../src/boot/dzimage.rs"]
 mod dzimage;
 
 use std::env;

@@ -253,7 +253,7 @@ impl DefHeader {
         arch: DefArch::NATIVE as u8,
         binary_type: DefType::App as u8,
         format_version: DEF_FORMAT_VERSION,
-        abi_version: crate::ABI_VERSION as u32,
+        abi_version: crate::abi::ABI_VERSION as u32,
         flags: 0,
         segment_count: 0,
         reserved: 0,

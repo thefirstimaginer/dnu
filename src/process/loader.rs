@@ -8,15 +8,15 @@ use core::mem::size_of;
 use core::ptr;
 
 use crate::abi::trap::TrapFrame;
-use crate::exec::def::{self, Def};
 use crate::fpu;
 use crate::gdt;
 use crate::paging::{AddressSpace, MapError, PageFlags};
-use crate::exec::process::{
+use crate::process::{
     FpuState, Priority, Process, KERNEL_STACK_SIZE, KERNEL_STACKS, MAX_EXEC_ARGS, MAX_EXEC_ENV,
     PAGE_SIZE, USER_HEAP_START, USER_STACK_SIZE, USER_STACK_TOP,
 };
-use imagineos_abi::def::DefPermissions;
+use crate::process::def::{self, Def};
+use crate::abi::def::DefPermissions;
 
 use super::space::copy_to_space_result;
 
@@ -164,7 +164,7 @@ pub struct ProcessCredentials {
     pub uid: u32,
     pub gid: u32,
     pub is_admin: bool,
-    pub username: [u8; imagineos_abi::ACCOUNT_NAME_SIZE],
+    pub username: [u8; crate::abi::ACCOUNT_NAME_SIZE],
     pub username_length: usize,
 }
 
@@ -175,7 +175,7 @@ impl ProcessCredentials {
         gid: 0,
         is_admin: true,
         username: {
-            let mut u = [0; imagineos_abi::ACCOUNT_NAME_SIZE];
+            let mut u = [0; crate::abi::ACCOUNT_NAME_SIZE];
             u[0] = b'r';
             u[1] = b'o';
             u[2] = b'o';
@@ -187,7 +187,7 @@ impl ProcessCredentials {
 
     /// Credenciais de um usuário comum não-root.
     pub fn user(uid: u32, gid: u32, is_admin: bool, username: &[u8]) -> Self {
-        let mut name = [0; imagineos_abi::ACCOUNT_NAME_SIZE];
+        let mut name = [0; crate::abi::ACCOUNT_NAME_SIZE];
         let len = username.len().min(name.len());
         name[..len].copy_from_slice(&username[..len]);
         Self {
@@ -276,7 +276,7 @@ pub fn load(
         frame.write(initial_frame(entry, user_stack, user_argv, user_envp, arguments, environment));
     }
 
-    let mut process_name = [0; imagineos_abi::PROCESS_NAME_SIZE];
+    let mut process_name = [0; crate::abi::PROCESS_NAME_SIZE];
     let copied_name_length = name.len().min(process_name.len());
     process_name[..copied_name_length].copy_from_slice(&name.as_bytes()[..copied_name_length]);
     let mut fpu_state = FpuState::EMPTY;
@@ -310,7 +310,7 @@ pub fn load(
         heap_end: USER_HEAP_START,
         name: process_name,
         pending_signals: 0,
-        signal_actions: [imagineos_abi::SIGNAL_DEFAULT; 32],
+        signal_actions: [crate::abi::SIGNAL_DEFAULT; 32],
         signal_restorer: 0,
         signal_frame: None,
         fpu_state,
@@ -319,10 +319,10 @@ pub fn load(
         // Bloco TLS montado acima (0 quando o DEF não tem `PT_TLS`).
         fs_base,
         futex_address: 0,
-        futex_bitset: imagineos_abi::FUTEX_BITSET_MATCH_ANY,
+        futex_bitset: crate::abi::FUTEX_BITSET_MATCH_ANY,
         futex_sequence: 0,
         wake_deadline: 0,
-        mappings: [crate::exec::process::Mapping::EMPTY; crate::exec::process::MAX_MAPPINGS],
+        mappings: [crate::process::Mapping::EMPTY; crate::process::MAX_MAPPINGS],
         mapping_count: 0,
     })
 }

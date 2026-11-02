@@ -13,7 +13,7 @@
 
 use core::cell::UnsafeCell;
 
-use imagineos_abi::{PIPE_CAPACITY, MAX_PIPES};
+use crate::abi::{PIPE_CAPACITY, MAX_PIPES};
 
 /// Índice de um pipe na tabela global.
 pub type PipeId = usize;

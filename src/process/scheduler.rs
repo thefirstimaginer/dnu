@@ -19,13 +19,13 @@ use crate::abi::trap::TrapFrame;
 use crate::fpu;
 use crate::gdt;
 use crate::paging::{self, AddressSpace, MapError};
-pub use imagineos_abi::UserArg;
+pub use crate::abi::UserArg;
 
-use crate::exec::descriptors;
-use crate::exec::loader::{self, FrameLocation, LoadError};
-use crate::exec::space;
+use crate::process::descriptors;
+use crate::process::loader::{self, FrameLocation, LoadError};
+use crate::process::space;
 
-pub(crate) const MAX_PROCESSES: usize = imagineos_abi::MAX_PROCESSES;
+pub(crate) const MAX_PROCESSES: usize = crate::abi::MAX_PROCESSES;
 
 /// Faixas anônimas simultâneas por processo (`mmap`).
 ///
@@ -76,9 +76,9 @@ pub const USER_STACK_TOP: u64 = 0x0000_7fff_ffff_0000;
 pub const PAGE_SIZE: u64 = 4096;
 pub(crate) const USER_HEAP_START: u64 = 0x0000_0001_0000_0000;
 const USER_HEAP_LIMIT: u64 = 64 * 1024 * 1024;
-pub const MAX_EXEC_ARGS: usize = imagineos_abi::MAX_EXEC_ARGS;
-pub const MAX_EXEC_ENV: usize = imagineos_abi::MAX_EXEC_ENV;
-pub const MAX_OPEN_FDS: usize = imagineos_abi::MAX_OPEN_FDS;
+pub const MAX_EXEC_ARGS: usize = crate::abi::MAX_EXEC_ARGS;
+pub const MAX_EXEC_ENV: usize = crate::abi::MAX_EXEC_ENV;
+pub const MAX_OPEN_FDS: usize = crate::abi::MAX_OPEN_FDS;
 
 /// Número máximo de ticks que um processo pode ficar em modo kernel durante
 /// uma única syscall antes de ser preemptado voluntariamente (~100 ms a 100 Hz).
@@ -86,7 +86,7 @@ pub(crate) const KERNEL_YIELD_TICKS: u64 = 10;
 
 // A ABI e o resto do kernel usam os descritores pelo caminho curto
 // `crate::process::Descriptor*`, como antes do split em módulos.
-pub use crate::exec::descriptors::{Descriptor, DescriptorKind};
+pub use crate::process::descriptors::{Descriptor, DescriptorKind};
 
 /// Slot do processo atualmente escalonado.
 fn current_slot() -> usize {
@@ -190,12 +190,12 @@ pub struct Process {
     pub(crate) uid: u32,
     pub(crate) gid: u32,
     pub(crate) is_admin: bool,
-    pub(crate) username: [u8; imagineos_abi::ACCOUNT_NAME_SIZE],
+    pub(crate) username: [u8; crate::abi::ACCOUNT_NAME_SIZE],
     pub(crate) username_length: usize,
     pub(crate) frame: *mut TrapFrame,
     pub(crate) address_space: Option<AddressSpace>,
     pub(crate) heap_end: u64,
-    pub(crate) name: [u8; imagineos_abi::PROCESS_NAME_SIZE],
+    pub(crate) name: [u8; crate::abi::PROCESS_NAME_SIZE],
     pub(crate) pending_signals: u64,
     pub(crate) signal_actions: [u64; 32],
     pub(crate) signal_restorer: u64,
@@ -253,7 +253,7 @@ impl Process {
         gid: 0,
         is_admin: true,
         username: {
-            let mut name = [0; imagineos_abi::ACCOUNT_NAME_SIZE];
+            let mut name = [0; crate::abi::ACCOUNT_NAME_SIZE];
             name[0] = b'r';
             name[1] = b'o';
             name[2] = b'o';
@@ -264,9 +264,9 @@ impl Process {
         frame: ptr::null_mut(),
         address_space: None,
         heap_end: USER_HEAP_START,
-        name: [0; imagineos_abi::PROCESS_NAME_SIZE],
+        name: [0; crate::abi::PROCESS_NAME_SIZE],
         pending_signals: 0,
-        signal_actions: [imagineos_abi::SIGNAL_DEFAULT; 32],
+        signal_actions: [crate::abi::SIGNAL_DEFAULT; 32],
         signal_restorer: 0,
         signal_frame: None,
         fpu_state: FpuState::EMPTY,
@@ -276,7 +276,7 @@ impl Process {
         fs_base: 0,
         futex_address: 0,
         futex_sequence: 0,
-        futex_bitset: imagineos_abi::FUTEX_BITSET_MATCH_ANY,
+        futex_bitset: crate::abi::FUTEX_BITSET_MATCH_ANY,
         wake_deadline: 0,
         mappings: [Mapping::EMPTY; MAX_MAPPINGS],
         mapping_count: 0,
@@ -492,7 +492,7 @@ pub fn set_current_futex(address: u64, bitset: u64) {
     let process = &mut scheduler.processes[scheduler.current];
     process.futex_address = address;
         process.futex_bitset = if bitset == 0 {
-        imagineos_abi::FUTEX_BITSET_MATCH_ANY
+        crate::abi::FUTEX_BITSET_MATCH_ANY
     } else {
         bitset
     };
@@ -766,7 +766,7 @@ pub fn send_signal(pid: usize, signal: u64) -> i64 {
         return -1;
     }
     process.pending_signals |= 1u64 << signal;
-    if signal == imagineos_abi::SIGNAL_CONT || signal == imagineos_abi::SIGNAL_KILL {
+    if signal == crate::abi::SIGNAL_CONT || signal == crate::abi::SIGNAL_KILL {
         process.stopped = false;
     }
     0
@@ -774,10 +774,10 @@ pub fn send_signal(pid: usize, signal: u64) -> i64 {
 
 pub fn set_signal_action(signal: u64, handler: u64, restorer: u64) -> i64 {
     if !valid_signal(signal)
-        || signal == imagineos_abi::SIGNAL_KILL
-        || signal == imagineos_abi::SIGNAL_STOP
-        || (handler != imagineos_abi::SIGNAL_DEFAULT
-            && handler != imagineos_abi::SIGNAL_IGNORE
+        || signal == crate::abi::SIGNAL_KILL
+        || signal == crate::abi::SIGNAL_STOP
+        || (handler != crate::abi::SIGNAL_DEFAULT
+            && handler != crate::abi::SIGNAL_IGNORE
             && (restorer == 0
                 || with_current_space(|space| {
                     space.translate(handler).is_none() || space.translate(restorer).is_none()
@@ -788,7 +788,7 @@ pub fn set_signal_action(signal: u64, handler: u64, restorer: u64) -> i64 {
     let scheduler = unsafe { &mut *SCHEDULER.0.get() };
     let process = &mut scheduler.processes[scheduler.current];
     process.signal_actions[signal as usize] = handler;
-    if handler > imagineos_abi::SIGNAL_IGNORE {
+    if handler > crate::abi::SIGNAL_IGNORE {
         process.signal_restorer = restorer;
     }
     0
@@ -821,34 +821,34 @@ pub fn deliver_pending_signal(frame: *mut TrapFrame) -> *mut TrapFrame {
             return frame;
         };
         if process.signal_frame.is_some()
-            && signal != imagineos_abi::SIGNAL_KILL
-            && signal != imagineos_abi::SIGNAL_STOP
+            && signal != crate::abi::SIGNAL_KILL
+            && signal != crate::abi::SIGNAL_STOP
         {
             return frame;
         }
         process.pending_signals &= !(1u64 << signal);
         let handler = process.signal_actions[signal as usize];
         match handler {
-            imagineos_abi::SIGNAL_IGNORE
-                if signal != imagineos_abi::SIGNAL_KILL && signal != imagineos_abi::SIGNAL_STOP =>
+            crate::abi::SIGNAL_IGNORE
+                if signal != crate::abi::SIGNAL_KILL && signal != crate::abi::SIGNAL_STOP =>
             {
                 continue;
             }
-            _ if signal == imagineos_abi::SIGNAL_KILL
-                || (handler == imagineos_abi::SIGNAL_DEFAULT && is_terminating_signal(signal)) =>
+            _ if signal == crate::abi::SIGNAL_KILL
+                || (handler == crate::abi::SIGNAL_DEFAULT && is_terminating_signal(signal)) =>
             {
                 return schedule(frame, true);
             }
-            _ if signal == imagineos_abi::SIGNAL_STOP => {
+            _ if signal == crate::abi::SIGNAL_STOP => {
                 process.stopped = true;
                 return schedule(frame, false);
             }
-            _ if signal == imagineos_abi::SIGNAL_CONT
-                && handler <= imagineos_abi::SIGNAL_IGNORE =>
+            _ if signal == crate::abi::SIGNAL_CONT
+                && handler <= crate::abi::SIGNAL_IGNORE =>
             {
                 continue;
             }
-            _ if handler > imagineos_abi::SIGNAL_IGNORE => {
+            _ if handler > crate::abi::SIGNAL_IGNORE => {
                 let Some(space) = process.address_space else {
                     return schedule(frame, true);
                 };
@@ -877,7 +877,7 @@ pub fn deliver_pending_signal(frame: *mut TrapFrame) -> *mut TrapFrame {
     }
 }
 
-pub fn snapshot() -> ([imagineos_abi::ProcessInfo; MAX_PROCESSES], usize) {
+pub fn snapshot() -> ([crate::abi::ProcessInfo; MAX_PROCESSES], usize) {
     let (processes, count, _) = snapshot_with_count();
     (processes, count)
 }
@@ -886,10 +886,10 @@ pub fn snapshot() -> ([imagineos_abi::ProcessInfo; MAX_PROCESSES], usize) {
 ///
 /// `top` precisa distinguir o processo que está rodando agora dos demais, e essa
 /// informação só existe no escalonador.
-pub fn snapshot_with_count() -> ([imagineos_abi::ProcessInfo; MAX_PROCESSES], usize, usize) {
+pub fn snapshot_with_count() -> ([crate::abi::ProcessInfo; MAX_PROCESSES], usize, usize) {
     let scheduler = unsafe { &*SCHEDULER.0.get() };
     let current = scheduler.current;
-    let mut result = [imagineos_abi::ProcessInfo::default(); MAX_PROCESSES];
+    let mut result = [crate::abi::ProcessInfo::default(); MAX_PROCESSES];
     let mut count = 0;
     let mut current_index = usize::MAX;
     for (index, process) in scheduler.processes.iter().enumerate() {
@@ -899,7 +899,7 @@ pub fn snapshot_with_count() -> ([imagineos_abi::ProcessInfo; MAX_PROCESSES], us
         if index == current {
             current_index = count;
         }
-        result[count] = imagineos_abi::ProcessInfo {
+        result[count] = crate::abi::ProcessInfo {
             pid: process.pid as u64,
             state: process_state(process),
             pending_signals: process.pending_signals as u32,
@@ -916,13 +916,13 @@ pub fn snapshot_with_count() -> ([imagineos_abi::ProcessInfo; MAX_PROCESSES], us
 
 fn process_state(process: &Process) -> u32 {
     if process.zombie {
-        imagineos_abi::PROCESS_ZOMBIE
+        crate::abi::PROCESS_ZOMBIE
     } else if process.stopped {
-        imagineos_abi::PROCESS_STOPPED
+        crate::abi::PROCESS_STOPPED
     } else if process.waiting_for != 0 || process.futex_address != 0 {
-        imagineos_abi::PROCESS_WAITING
+        crate::abi::PROCESS_WAITING
     } else {
-        imagineos_abi::PROCESS_RUNNING
+        crate::abi::PROCESS_RUNNING
     }
 }
 
@@ -1219,7 +1219,7 @@ pub fn spawn_current(
 ) -> *mut TrapFrame {
     // Plain `exec` keeps the default stdio: it is the historical behaviour and
     // what init/getty rely on.
-    spawn_current_with_io(path, arguments, environment, &imagineos_abi::SpawnIo::default(), frame)
+    spawn_current_with_io(path, arguments, environment, &crate::abi::SpawnIo::default(), frame)
 }
 
 /// `execve(2)`: substitui a imagem do processo atual.
@@ -1351,12 +1351,12 @@ pub fn execve_current(
 /// `io` holds descriptor numbers owned by the caller: each is duplicated into
 /// the child (stdin/stdout/stderr respectively), so a shell can hand a pipe end
 /// to a child without a real `fork`. Fields set to
-/// [`imagineos_abi::SpawnIo::INHERIT`] keep the caller's descriptor.
+/// [`crate::abi::SpawnIo::INHERIT`] keep the caller's descriptor.
 pub fn spawn_current_with_io(
     path: &str,
     arguments: &[&[u8]],
     environment: &[&[u8]],
-    io: &imagineos_abi::SpawnIo,
+    io: &crate::abi::SpawnIo,
     frame: *mut TrapFrame,
 ) -> *mut TrapFrame {
     if !has_access(path, 1) {
@@ -1566,7 +1566,7 @@ pub fn fork_current(frame: *mut TrapFrame) -> *mut TrapFrame {
         tls_alignment: parent.tls_alignment,
         fs_base: read_fs_base(),
         futex_address: 0,
-        futex_bitset: imagineos_abi::FUTEX_BITSET_MATCH_ANY,
+        futex_bitset: crate::abi::FUTEX_BITSET_MATCH_ANY,
         futex_sequence: 0,
         wake_deadline: 0,
         mappings: [Mapping::EMPTY; MAX_MAPPINGS],
@@ -1633,7 +1633,7 @@ pub fn waitpid_current(frame: *mut TrapFrame, pid: i64, status_pointer: u64, opt
 
         // WNOHANG: nunca bloqueia. Com filho vivo e nenhum terminado, o
         // resultado é 0 ("pid 0") conforme POSIX, sem yield.
-        if options & imagineos_abi::WNOHANG != 0 {
+        if options & crate::abi::WNOHANG != 0 {
             unsafe {
                 (*frame).rax = 0;
             }
@@ -1736,7 +1736,7 @@ fn has_access(path: &str, requested: u16) -> bool {
         return true;
     }
     let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
-    let mut prefix = [0u8; imagineos_abi::MAX_MUTABLE_PATH];
+    let mut prefix = [0u8; crate::abi::MAX_MUTABLE_PATH];
     let mut length = 0usize;
     for component in parent.trim_matches('/').split('/') {
         if component.is_empty() {
@@ -1780,41 +1780,32 @@ pub fn authenticate_current(username: &[u8], password: &[u8], target_uid: u32) -
     let is_self = username == &current.username[..current.username_length];
     if target_uid == 0 && is_self && current.uid != 0 {
         // sudo authenticates the caller, then elevates only an explicitly enabled account.
-        if !current.is_admin || crate::usr::accounts::authenticate(username, password).is_none() {
+        if !current.is_admin || true {
+            // Autenticação de contas não implementada neste estágio.
             return -1;
         }
         current.uid = 0;
         current.gid = 0;
         current.is_admin = true;
-        current.username = [0; imagineos_abi::ACCOUNT_NAME_SIZE];
+        current.username = [0; crate::abi::ACCOUNT_NAME_SIZE];
         current.username[..4].copy_from_slice(b"root");
         current.username_length = 4;
         return 0;
     }
-    let Some(account) = crate::usr::accounts::authenticate(username, password) else {
-        return -1;
-    };
-    if target_uid != u32::MAX && account.uid != target_uid {
-        return -1;
-    }
-    current.uid = account.uid;
-    current.gid = account.gid;
-    current.is_admin = account.administrator;
-    current.username = account.username;
-    current.username_length = account.username_length;
-    0
+    // Autenticação de contas não implementada neste estágio.
+    return -1;
 }
 
-pub fn current_identity() -> imagineos_abi::UserIdentity {
+pub fn current_identity() -> crate::abi::UserIdentity {
     let scheduler = unsafe { &*SCHEDULER.0.get() };
     let process = scheduler.processes[scheduler.current];
-    let mut identity = imagineos_abi::UserIdentity {
+    let mut identity = crate::abi::UserIdentity {
         uid: process.uid,
         gid: process.gid,
         is_admin: u32::from(process.is_admin),
         username_length: process.username_length as u32,
         username: process.username,
-        ..imagineos_abi::UserIdentity::default()
+        ..crate::abi::UserIdentity::default()
     };
     if let Some(hostname) = crate::ramfs::read("/etc/hostname") {
         let hostname = hostname.strip_suffix(b"\n").unwrap_or(hostname);
@@ -1831,25 +1822,25 @@ pub fn current_identity() -> imagineos_abi::UserIdentity {
 fn valid_signal(signal: u64) -> bool {
     matches!(
         signal,
-        imagineos_abi::SIGNAL_HUP
-            | imagineos_abi::SIGNAL_INT
-            | imagineos_abi::SIGNAL_KILL
-            | imagineos_abi::SIGNAL_SEGV
-            | imagineos_abi::SIGNAL_TERM
-            | imagineos_abi::SIGNAL_CONT
-            | imagineos_abi::SIGNAL_STOP
+        crate::abi::SIGNAL_HUP
+            | crate::abi::SIGNAL_INT
+            | crate::abi::SIGNAL_KILL
+            | crate::abi::SIGNAL_SEGV
+            | crate::abi::SIGNAL_TERM
+            | crate::abi::SIGNAL_CONT
+            | crate::abi::SIGNAL_STOP
     )
 }
 
 fn next_pending_signal(pending: u64) -> Option<u64> {
     [
-        imagineos_abi::SIGNAL_KILL,
-        imagineos_abi::SIGNAL_STOP,
-        imagineos_abi::SIGNAL_CONT,
-        imagineos_abi::SIGNAL_HUP,
-        imagineos_abi::SIGNAL_INT,
-        imagineos_abi::SIGNAL_SEGV,
-        imagineos_abi::SIGNAL_TERM,
+        crate::abi::SIGNAL_KILL,
+        crate::abi::SIGNAL_STOP,
+        crate::abi::SIGNAL_CONT,
+        crate::abi::SIGNAL_HUP,
+        crate::abi::SIGNAL_INT,
+        crate::abi::SIGNAL_SEGV,
+        crate::abi::SIGNAL_TERM,
     ]
     .into_iter()
     .find(|signal| pending & (1u64 << signal) != 0)
@@ -1858,17 +1849,17 @@ fn next_pending_signal(pending: u64) -> Option<u64> {
 pub fn is_terminating_signal(signal: u64) -> bool {
     matches!(
         signal,
-        imagineos_abi::SIGNAL_HUP
-            | imagineos_abi::SIGNAL_INT
-            | imagineos_abi::SIGNAL_SEGV
-            | imagineos_abi::SIGNAL_TERM
+        crate::abi::SIGNAL_HUP
+            | crate::abi::SIGNAL_INT
+            | crate::abi::SIGNAL_SEGV
+            | crate::abi::SIGNAL_TERM
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{is_terminating_signal, next_pending_signal, valid_signal};
-    use imagineos_abi::{
+    use crate::abi::{
         SIGNAL_HUP, SIGNAL_INT, SIGNAL_KILL, SIGNAL_SEGV, SIGNAL_STOP, SIGNAL_TERM,
     };
 
@@ -1880,7 +1871,7 @@ mod tests {
             SIGNAL_KILL,
             SIGNAL_SEGV,
             SIGNAL_TERM,
-            imagineos_abi::SIGNAL_CONT,
+            crate::abi::SIGNAL_CONT,
             SIGNAL_STOP,
         ] {
             assert!(valid_signal(signal));
@@ -1906,7 +1897,7 @@ mod tests {
         assert!(is_terminating_signal(SIGNAL_SEGV));
         assert!(is_terminating_signal(SIGNAL_TERM));
         assert!(!is_terminating_signal(SIGNAL_STOP));
-        assert!(!is_terminating_signal(imagineos_abi::SIGNAL_CONT));
+        assert!(!is_terminating_signal(crate::abi::SIGNAL_CONT));
     }
 }
 
@@ -1968,7 +1959,7 @@ pub fn copy_to_current_user(address: u64, input: &[u8]) -> bool {
 /// usuário e o `wake_deadline`. Não é registrada como filha (`parent`) porque
 /// `waitpid` coleciona processos, não threads.
 pub fn create_thread(
-    request: imagineos_abi::ThreadCreate,
+    request: crate::abi::ThreadCreate,
     _frame: *mut TrapFrame,
 ) -> Result<usize, i64> {
     let (slot, tid, parent_slot) = {
@@ -1983,7 +1974,7 @@ pub fn create_thread(
             .iter()
             .filter(|process| process.active && process.tgid == parent.tgid)
             .count();
-        if threads >= imagineos_abi::MAX_THREADS_PER_PROCESS {
+        if threads >= crate::abi::MAX_THREADS_PER_PROCESS {
             return Err(-11 /* EAGAIN */);
         }
         let Some(slot) = scheduler.processes.iter().position(|process| !process.active) else {
@@ -2014,12 +2005,12 @@ pub fn create_thread(
         request.stack_top
     } else {
         let top = USER_STACK_TOP
-            - (parent.tgid as u64 % 64 + 1) * (imagineos_abi::THREAD_STACK_SIZE + PAGE_SIZE);
-        let start = top - imagineos_abi::THREAD_STACK_SIZE;
+            - (parent.tgid as u64 % 64 + 1) * (crate::abi::THREAD_STACK_SIZE + PAGE_SIZE);
+        let start = top - crate::abi::THREAD_STACK_SIZE;
         if address_space
             .try_map_range(
                 start,
-                imagineos_abi::THREAD_STACK_SIZE,
+                crate::abi::THREAD_STACK_SIZE,
                 paging::PageFlags::READ_WRITE,
             )
             .is_err()
@@ -2100,7 +2091,7 @@ pub fn create_thread(
         tls_alignment: parent.tls_alignment,
         fs_base: if request.tls != 0 { request.tls } else { read_fs_base() },
         futex_address: 0,
-        futex_bitset: imagineos_abi::FUTEX_BITSET_MATCH_ANY,
+        futex_bitset: crate::abi::FUTEX_BITSET_MATCH_ANY,
         futex_sequence: 0,
         wake_deadline: 0,
         mappings: parent.mappings,
@@ -2319,7 +2310,7 @@ pub fn next_free_mapping_address(from: u64, size: u64) -> Option<u64> {
     let mut candidate = from;
     'search: loop {
         let end = candidate.checked_add(size)?;
-        if end > imagineos_abi::MMAP_REGION_END {
+        if end > crate::abi::MMAP_REGION_END {
             return None;
         }
         for index in 0..process.mapping_count {

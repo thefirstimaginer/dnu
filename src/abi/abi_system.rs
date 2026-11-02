@@ -4,7 +4,7 @@
 //! São chamadas administrativas: a maioria exige UID 0, PID 1 ou o privilégio
 //! de instalação concedido no boot (`/bin/distroinstall`).
 
-use imagineos_abi::{InstallConfig, MAX_CONSOLE_WRITE, MAX_IO_SIZE, SYS_INSTALL_DISK};
+use crate::abi::{InstallConfig, MAX_CONSOLE_WRITE, MAX_IO_SIZE, SYS_INSTALL_DISK};
 
 use super::trap::{TrapFrame, EFAULT, EINVAL, ENODEV, EPERM};
 use super::user::{copy_struct_from_user, copy_struct_to_user};
@@ -32,7 +32,7 @@ pub fn system_info(frame: &mut TrapFrame) -> *mut TrapFrame {
             (description.width as u32, description.height as u32)
         });
     let (_, _, process_count) = process::snapshot_with_count();
-    let info = imagineos_abi::SystemInfo {
+    let info = crate::abi::SystemInfo {
         uptime_microseconds: crate::time::elapsed_microseconds().unwrap_or(0),
         tsc_frequency: crate::time::tsc_frequency(),
         memory_total,
@@ -42,7 +42,7 @@ pub fn system_info(frame: &mut TrapFrame) -> *mut TrapFrame {
         process_count: process_count as u32,
         priority: process::current_priority() as u32,
         pid: process::current_pid() as u64,
-        abi_version: imagineos_abi::ABI_VERSION,
+        abi_version: crate::abi::ABI_VERSION,
     };
     if copy_struct_to_user(frame.rdi, &info) {
         frame.ok(0)

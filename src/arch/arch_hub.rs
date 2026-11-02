@@ -6,7 +6,7 @@
 //! A árvore de `src/` é plana: o timer (antigo `arch/x86_64/timer.rs`) é
 //! `arch_timer.rs` e o hub o expõe no caminho `arch::x86_64::timer`.
 
-#[path = "../arch/arch_timer.rs"]
+#[path = "arch_timer.rs"]
 pub mod timer;
 
 pub mod x86_64 {

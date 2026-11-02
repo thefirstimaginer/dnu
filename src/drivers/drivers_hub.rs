@@ -9,15 +9,15 @@
 //! concreta (ata, keyboard, mouse, timer, framebuffer) e este hub declara as
 //! folhas com `#[path]` relativo a ele.
 
-#[path = "../drivers/drv_registry.rs"]
+#[path = "drv_registry.rs"]
 pub mod registry;
 
 pub use registry::{Device, DeviceClass};
-#[path = "../drivers/drv_block.rs"]
+#[path = "drv_block.rs"]
 pub mod block;
-#[path = "../drivers/drv_input.rs"]
+#[path = "drv_input.rs"]
 pub mod input;
-#[path = "../drivers/drv_video.rs"]
+#[path = "drv_video.rs"]
 pub mod video;
-#[path = "../drivers/drv_platform.rs"]
+#[path = "drv_platform.rs"]
 pub mod platform;

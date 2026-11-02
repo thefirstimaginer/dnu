@@ -90,16 +90,16 @@ mod tests {
     #[test]
     fn terminating_signals_are_refused_for_init_only() {
         for signal in [
-            imagineos_abi::SIGNAL_KILL,
-            imagineos_abi::SIGNAL_TERM,
-            imagineos_abi::SIGNAL_SEGV,
+            crate::abi::SIGNAL_KILL,
+            crate::abi::SIGNAL_TERM,
+            crate::abi::SIGNAL_SEGV,
         ] {
             assert_eq!(can_signal(PID_INIT, signal), Err(EPERM));
             assert_eq!(can_signal(2, signal), Ok(()));
         }
         // Parar o supervisor continua permitido: é preciso poder depurá-lo.
-        assert_eq!(can_signal(PID_INIT, imagineos_abi::SIGNAL_STOP), Ok(()));
-        assert_eq!(can_signal(PID_INIT, imagineos_abi::SIGNAL_INT), Ok(()));
+        assert_eq!(can_signal(PID_INIT, crate::abi::SIGNAL_STOP), Ok(()));
+        assert_eq!(can_signal(PID_INIT, crate::abi::SIGNAL_INT), Ok(()));
     }
 
     #[test]

@@ -10,7 +10,7 @@
 //! `exec`, `execve` e `spawn` compartilham a decodificação de `argv`/`envp`,
 //! feita por `ExecArguments`.
 
-use imagineos_abi::{SpawnIo, MAX_EXEC_ARGS, MAX_EXEC_ENV, MAX_EXEC_ITEM_SIZE};
+use crate::abi::{SpawnIo, MAX_EXEC_ARGS, MAX_EXEC_ENV, MAX_EXEC_ITEM_SIZE};
 
 use super::trap::{TrapFrame, E2BIG, EFAULT, EINVAL};
 use super::user::{copy_struct_from_user, load_user_vector, vector_slices, Vector};
@@ -18,7 +18,7 @@ use crate::process;
 
 /// `exec`/`execve`: decodifica caminho, argumentos e ambiente.
 pub fn exec_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
-    let replace = frame.rax == imagineos_abi::SYS_EXECVE;
+    let replace = frame.rax == crate::abi::SYS_EXECVE;
     let mut decoded = ExecArguments::new();
     if let Err(error) = decoded.load(frame) {
         return frame.fail(error);
@@ -140,7 +140,7 @@ pub fn create_pipe(frame: &mut TrapFrame) -> *mut TrapFrame {
 /// `process_list(&[ProcessInfo], capacity)`.
 pub fn process_list(frame: &mut TrapFrame) -> *mut TrapFrame {
     let capacity = frame.rsi as usize;
-    if capacity > imagineos_abi::MAX_PROCESSES {
+    if capacity > crate::abi::MAX_PROCESSES {
         return frame.fail(EINVAL);
     }
     let (processes, count) = process::snapshot();
@@ -148,7 +148,7 @@ pub fn process_list(frame: &mut TrapFrame) -> *mut TrapFrame {
     let bytes = unsafe {
         core::slice::from_raw_parts(
             processes.as_ptr().cast::<u8>(),
-            length * core::mem::size_of::<imagineos_abi::ProcessInfo>(),
+            length * core::mem::size_of::<crate::abi::ProcessInfo>(),
         )
     };
     if process::copy_to_current_user(frame.rdi, bytes) {
@@ -162,8 +162,8 @@ pub fn process_list(frame: &mut TrapFrame) -> *mut TrapFrame {
 pub fn authenticate(frame: &mut TrapFrame) -> *mut TrapFrame {
     let username_length = frame.rsi as usize;
     let password_length = frame.r10 as usize;
-    let mut username = [0u8; imagineos_abi::ACCOUNT_NAME_SIZE];
-    let mut password = [0u8; imagineos_abi::ACCOUNT_PASSWORD_SIZE];
+    let mut username = [0u8; crate::abi::ACCOUNT_NAME_SIZE];
+    let mut password = [0u8; crate::abi::ACCOUNT_PASSWORD_SIZE];
     let valid = username_length != 0
         && username_length <= username.len()
         && password_length != 0

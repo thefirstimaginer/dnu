@@ -25,9 +25,11 @@ resolver = "2"
 [features]
 # Ativa logs de diagnóstico extras (processo, serial numérica, ramfs).
 kernel-debug = []
+# Compila para boot direto via dnuboot: linker script em endereço baixo
+# (identity-mapped), entry point _direct_start, sem dependência do Limine.
+direct-boot = []
 
 [dependencies]
-imagineos_abi = { path = "../imagine-base/abi" }
 limine = "0.5.0"
 
 [profile.dev]
