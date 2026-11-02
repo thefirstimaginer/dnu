@@ -149,7 +149,7 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
     drivers::platform::register();
     subsystems::mark_ready(Subsystem::Acpi);
 
-    // Inicializa o ambiente gráfico estilo Windows NT 4.0 (GDI + Window Manager + Compositor).
+    // Inicializa o ambiente gráfico (GDI + Window Manager + Compositor).
     // O fb.addr() do Limine já é um endereço virtual via HHDM, mas pode estar
     // mapeado como somente-leitura. Garantimos permissão de escrita antes de usar.
     if let Some(fb_response) = boot::framebuffer_response() {
@@ -180,12 +180,12 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
             let cursor_y = fb_height as i32 / 2;
             compositor::compositor_set_cursor_pos(cursor_x, cursor_y);
 
-            console_write("Graphics subsystem initialized (WinNT 4.0 style)\n");
+            console_write("Graphics subsystem initialized\n");
 
             // Criar janela de demonstração
             let _hwnd = window::create_simple_window(
                 b"Imaginedevel OS\0".as_ptr(),
-                b"ImagineOS - Desktop NT4\0".as_ptr(),
+                b"ImagineOS\0".as_ptr(),
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE,
                 50, 50, 600, 400,
                 HWND(ptr::null_mut()),
@@ -206,7 +206,7 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
     // Inicializa o sistema de contas (tenta carregar users.db de DFS para RAMFS).
     usr::accounts::init_accounts();
     // Sistema inicia direto na GUI — não abre shell/login.
-    // O sistema permanece na área de trabalho NT4 até o desligamento.
+    // O sistema permanece na área de trabalho até o desligamento.
     loop {
         unsafe { asm!("hlt", options(nomem, nostack)); }
     }
