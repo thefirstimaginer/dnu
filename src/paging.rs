@@ -570,7 +570,7 @@ pub fn switch(space: AddressSpace) {
     }
 }
 
-pub fn map_hhdm_range(hhdm_offset: u64, physical_address: u64, length: usize) -> bool {
+pub fn map_hhdm_range(hhdm_offset: u64, physical_address: u64, length: usize, writable: bool) -> bool {
     let Some(end) = physical_address.checked_add(length as u64) else {
         return false;
     };
@@ -584,7 +584,7 @@ pub fn map_hhdm_range(hhdm_offset: u64, physical_address: u64, length: usize) ->
         let Some(virtual_address) = hhdm_offset.checked_add(physical) else {
             return false;
         };
-        if !map_hhdm_page(virtual_address, physical) {
+        if !map_hhdm_page(virtual_address, physical, writable) {
             return false;
         }
         physical = physical.saturating_add(PAGE_SIZE);
@@ -592,7 +592,7 @@ pub fn map_hhdm_range(hhdm_offset: u64, physical_address: u64, length: usize) ->
     true
 }
 
-fn map_hhdm_page(virtual_address: u64, physical_address: u64) -> bool {
+fn map_hhdm_page(virtual_address: u64, physical_address: u64, writable: bool) -> bool {
     let indices = [
         ((virtual_address >> 39) & 0x1ff) as usize,
         ((virtual_address >> 30) & 0x1ff) as usize,
@@ -624,6 +624,13 @@ fn map_hhdm_page(virtual_address: u64, physical_address: u64) -> bool {
     };
     let entry = unsafe { &mut *table.add(indices[3]) };
     if *entry & ENTRY_PRESENT != 0 {
+        // Atualiza permissões: garante escrita se solicitado.
+        if writable {
+            *entry |= ENTRY_WRITABLE;
+        }
+        unsafe {
+            asm!("invlpg [{}]", in(reg) virtual_address, options(nostack, preserves_flags));
+        }
         return *entry & ADDRESS_MASK == physical_address;
     }
     *entry = physical_address | ENTRY_PRESENT | ENTRY_WRITABLE;

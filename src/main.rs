@@ -6,6 +6,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 use core::arch::asm;
 use core::panic::PanicInfo;
+use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 // Grafo do kernel: cada `mod` é o arquivo de mesmo nome em `src/` (árvore
@@ -25,6 +26,9 @@ pub mod block;
 mod boot;
 mod boot_info;
 mod dzimage;
+mod gdi;
+mod window;
+mod compositor;
 #[path = "drivers_hub.rs"]
 pub mod drivers;
 mod subsystems;
@@ -41,7 +45,7 @@ mod console;
 mod fpu;
 mod gdt;
 pub mod gpt;
-mod heap;
+mod allocator;
 mod idt;
 mod installer;
 pub mod kernel_log;
@@ -64,11 +68,14 @@ use console::framebuffer;
 use console::serial as uart;
 use console::utf8;
 // Helpers legados de log/diagnóstico mantêm o caminho curto `crate::
-// serial_write`, `crate::serial_write_number` e `crate::kernel_halt`.
 pub(crate) use console::serial::serial_write;
 #[cfg(feature = "kernel-debug")]
 pub(crate) use console::serial::write_number as serial_write_number;
 pub(crate) use crate::halt as kernel_halt;
+pub(crate) use crate::gdi::{
+    HWND, COLORREF, WS_OVERLAPPED, WS_CAPTION, WS_SYSMENU, WS_THICKFRAME,
+    WS_MINIMIZEBOX, WS_MAXIMIZEBOX, WS_VISIBLE,
+};
 
 static LOG_LINE_START: AtomicBool = AtomicBool::new(true);
 // Fonte PSF embutida no kernel: o dzImage também a leva dentro do initramfs,
@@ -114,6 +121,11 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
         core::ptr::write_bytes(boot_frame.virtual_address, 0, 4096);
     }
     subsystems::mark_ready(Subsystem::Memory);
+    // Inicializa o alocador global (GlobalAlloc) antes de qualquer uso de Box/Vec/String.
+    unsafe {
+        allocator::allocator_init();
+    }
+    subsystems::mark_ready(Subsystem::Allocator);
     framebuffer::init(
         (!boot_info.framebuffer.is_null())
             .then(|| unsafe { &*boot_info.framebuffer })
@@ -137,6 +149,55 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
     drivers::platform::register();
     subsystems::mark_ready(Subsystem::Acpi);
 
+    // Inicializa o ambiente gráfico estilo Windows NT 4.0 (GDI + Window Manager + Compositor).
+    // O fb.addr() do Limine já é um endereço virtual via HHDM, mas pode estar
+    // mapeado como somente-leitura. Garantimos permissão de escrita antes de usar.
+    if let Some(fb_response) = boot::framebuffer_response() {
+        if let Some(fb) = fb_response.framebuffers().next() {
+            let fb_raw = fb.addr() as usize;
+            let hhdm = boot_info.hhdm_offset as usize;
+
+            // O endereço físico é fb.addr() - hhdm_offset.
+            let physical_address = fb_raw.checked_sub(hhdm).unwrap_or(0) as u64;
+            // Mapeia uma região generosa (16 MB) para cobrir todo o framebuffer
+            // independentemente de pitch/height reportados pelo Limine.
+            let framebuffer_size: usize = 16 * 1024 * 1024;
+
+            // Mapeia o framebuffer físico via HHDM com permissão de escrita.
+            let _mapped = paging::map_hhdm_range(boot_info.hhdm_offset, physical_address, framebuffer_size, true);
+
+            let fb_addr = fb_raw as *mut u8;
+            let fb_width = fb.width() as u32;
+            let fb_height = fb.height() as u32;
+            let fb_pitch = fb.pitch() as u32;
+
+            gdi::gdi_subsystem_init(fb_addr, fb_width, fb_height, fb_pitch);
+            window::window_manager_init();
+            compositor::compositor_init(fb_addr, fb_width, fb_height, fb_pitch);
+
+            // Inicializa o cursor do mouse no centro da tela
+            let cursor_x = fb_width as i32 / 2;
+            let cursor_y = fb_height as i32 / 2;
+            compositor::compositor_set_cursor_pos(cursor_x, cursor_y);
+
+            console_write("Graphics subsystem initialized (WinNT 4.0 style)\n");
+
+            // Criar janela de demonstração
+            let _hwnd = window::create_simple_window(
+                b"Imaginedevel OS\0".as_ptr(),
+                b"ImagineOS - Desktop NT4\0".as_ptr(),
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE,
+                50, 50, 600, 400,
+                HWND(ptr::null_mut()),
+                0,
+                1,
+            );
+
+            // Desenhar área de trabalho com ícones e cursor
+            compositor::compositor_render_all();
+        }
+    }
+
     // Referência única aos globais de I/O da ABI: mantê-los vivos mesmo quando
     // nenhuma syscall é compilada no binário (builds mínimos/testes).
     abi::anchor_runtime_state();
@@ -144,7 +205,11 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
     mount_root_filesystems(boot_info, disk_ready);
     // Inicializa o sistema de contas (tenta carregar users.db de DFS para RAMFS).
     usr::accounts::init_accounts();
-    start_init()
+    // Sistema inicia direto na GUI — não abre shell/login.
+    // O sistema permanece na área de trabalho NT4 até o desligamento.
+    loop {
+        unsafe { asm!("hlt", options(nomem, nostack)); }
+    }
 }
 
 /// Anuncia o estado do alocador depois que o framebuffer está pronto.
@@ -182,39 +247,7 @@ fn probe_storage() -> bool {
     console_write("ATA primary master ready; sectors: ");
     console_number(sectors);
     console_write("\n");
-    report_dfs_partition();
-    subsystems::mark_ready(Subsystem::Storage);
     true
-}
-
-/// Relatório do registro de drivers: tabela `/dev` do kernel.
-fn report_drivers() {
-    drivers::registry::report();
-}
-
-fn report_dfs_partition() {
-    let table = match gpt::Gpt::read_primary(&ata::PrimaryMaster) {
-        Ok(table) => table,
-        Err(gpt::GptError::InvalidSignature) => {
-            console_write("ATA disk has no primary GPT\n");
-            return;
-        }
-        Err(_) => {
-            console_write("ATA disk GPT is invalid or unreadable\n");
-            return;
-        }
-    };
-    match table.find_partition(&ata::PrimaryMaster, &gpt::DFS_PARTITION_TYPE_GUID) {
-        Ok(partition) => {
-            console_write("GPT DFS partition found at LBA ");
-            console_number(partition.first_lba);
-            console_write("\n");
-        }
-        Err(gpt::GptError::PartitionNotFound) => {
-            console_write("GPT detected; no DFS partition found\n");
-        }
-        Err(_) => console_write("GPT DFS partition lookup failed\n"),
-    }
 }
 
 /// Monta o RAMFS com o membro `initramfs` do `dzImage` e, se houver, o DFS
@@ -245,7 +278,6 @@ fn mount_root_filesystems(boot_info: &boot_info::BootInfo, disk_ready: bool) {
     load_global_config();
     load_font();
     subsystems::mark_ready(Subsystem::Configuration);
-    report_drivers();
 }
 
 /// Extrai o membro `initramfs` do `dzImage` carregado pelo Limine.
@@ -257,7 +289,10 @@ fn embedded_initramfs(boot_info: &boot_info::BootInfo) -> Option<&'static [u8]> 
         core::slice::from_raw_parts(boot_info.dzimage, boot_info.dzimage_size)
     };
     let member = dzimage::initramfs_member(image).ok()?;
-    Some(member.payload(image))
+    // `member.payload(image)` devolve uma fatia que referencia `image`, que
+    // tem vida estática (vem do ponteiro raw do Limine). Usamos unsafe para
+    // afirmar a vida estática.
+    Some(unsafe { &*(member.payload(image) as *const [u8]) })
 }
 
 fn load_global_config() {
@@ -369,6 +404,27 @@ fn console_hex(mut value: u64) {
         digits[cursor] = b'0';
     }
     write_to_console(&digits[cursor..]);
+}
+
+/// Escreve um u64 em hexadecimal na serial (sem newline).
+fn serial_write_hex(mut value: u64) {
+    let mut digits = [0u8; 16];
+    let mut cursor = digits.len();
+    if value == 0 {
+        serial_write(b"0");
+        return;
+    }
+    while value != 0 {
+        cursor -= 1;
+        let digit = (value & 0xf) as u8;
+        digits[cursor] = if digit < 10 {
+            b'0' + digit
+        } else {
+            b'a' + digit - 10
+        };
+        value >>= 4;
+    }
+    serial_write(&digits[cursor..]);
 }
 
 #[cfg(feature = "kernel-debug")]

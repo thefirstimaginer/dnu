@@ -1,3 +1,4 @@
-.build/
 target/
-.build/ramfs/bin/forktest
+/target
+/.build
+/build

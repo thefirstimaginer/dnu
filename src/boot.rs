@@ -56,37 +56,59 @@ pub fn mask_legacy_pic() {
     }
 }
 
+/// Retorna a resposta do framebuffer do Limine, se disponível.
+pub fn framebuffer_response() -> Option<&'static limine::response::FramebufferResponse> {
+    FRAMEBUFFER_REQUEST.get_response()
+}
+
 unsafe fn out(port: u16, value: u8) {
     asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
 }
 
 /// Coleta as respostas do Limine e transfere o controle para `kernel_entry`.
 pub fn limine_start() -> ! {
+    // Inicializa a UART cedo para diagnóstico, antes de qualquer verificação que
+    // possa fazer panic.
+    crate::console::serial::init();
+    crate::serial_write(b"boot: entering limine_start\r\n");
+
     if !BASE_REVISION.is_supported() {
+        crate::serial_write(b"boot: BASE_REVISION not supported\r\n");
         panic!("Limine protocol revision is unsupported");
     }
+    crate::serial_write(b"boot: BASE_REVISION ok\r\n");
     let memory_map = MEMORY_MAP_REQUEST
         .get_response()
         .expect("Limine did not provide a memory map");
+    crate::serial_write(b"boot: memory map ok\r\n");
     let hhdm = HHDM_REQUEST
         .get_response()
         .expect("Limine did not provide an HHDM mapping");
+    crate::serial_write(b"boot: HHDM ok\r\n");
     let module_response = MODULE_REQUEST
         .get_response()
         .expect("Limine did not provide modules");
+    crate::serial_write(b"boot: modules ok\r\n");
     // O dzImage é o único artefato de boot: a tabela de membros dele aponta
     // para o kernel e para o initramfs. Sem ele não há raiz volátil.
     let dzimage = module_response
         .modules()
         .iter()
-        .find(|module| module.path().to_bytes().ends_with(DZIMAGE_MODULE))
-        .unwrap_or_else(|| panic!("required /boot/dzImage module is missing"));
+        .find(|module| module.path().to_bytes().ends_with(DZIMAGE_MODULE));
+    let Some(dzimage) = dzimage else {
+        crate::serial_write(b"boot: dzImage module NOT FOUND\r\n");
+        panic!("required /boot/dzImage module is missing");
+    };
+    crate::serial_write(b"boot: dzImage module found\r\n");
     let dzimage_bytes = unsafe {
         core::slice::from_raw_parts(dzimage.addr(), dzimage.size() as usize)
     };
+    crate::serial_write(b"boot: dzImage bytes mapped\r\n");
     if let Err(error) = crate::dzimage::verify(dzimage_bytes, imagineos_abi::ABI_VERSION) {
+        crate::serial_write(b"boot: dzImage verify FAILED\r\n");
         panic!("dzImage failed verification: {error:?}");
     }
+    crate::serial_write(b"boot: dzImage verify OK\r\n");
 
     // Sem bootstrap: nada além do que o próprio Limine usa
     // (incluindo a árvore de páginas de boot e o ELF carregado) fica vivo

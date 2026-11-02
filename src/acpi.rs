@@ -293,7 +293,7 @@ unsafe fn acpi_table<'a>(address: u64, hhdm_offset: u64) -> Option<&'a [u8]> {
 }
 
 unsafe fn physical_bytes<'a>(address: u64, hhdm_offset: u64, length: usize) -> Option<&'a [u8]> {
-    if !crate::paging::map_hhdm_range(hhdm_offset, address, length) {
+    if !crate::paging::map_hhdm_range(hhdm_offset, address, length, false) {
         return None;
     }
     let virtual_address = hhdm_offset.checked_add(address)?;
@@ -472,7 +472,7 @@ fn mmio_register_pointer(register: AcpiRegister, hhdm_offset: u64) -> Option<*mu
     if register.address % byte_width as u64 != 0 {
         return None;
     }
-    if !crate::paging::map_hhdm_range(hhdm_offset, register.address, byte_width) {
+    if !crate::paging::map_hhdm_range(hhdm_offset, register.address, byte_width, true) {
         return None;
     }
     let virtual_address = hhdm_offset.checked_add(register.address)?;

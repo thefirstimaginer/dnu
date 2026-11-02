@@ -1,82 +1,24 @@
-//! Ferramenta de host que monta o **dzImage** (DNU Zipped Image).
+//! Entry point da ferramenta de host `dzimage`.
 //!
-//! O `dzImage` é o único artefato que o repositório DNU publica; toda a
-//! estrutura do ImagineOS (ISO, imagem de disco, diretório do instalador)
-//! consome só ele.
-//!
-//! Layout (valores little-endian, payloads alinhados a 8 bytes):
-//!
-//! ```text
-//! +0   magic   [8]  "DZIMAGE\0"
-//! +8   version u32  = 2
-//! +12  abi     u32  ABI_VERSION do crate imagineos_abi
-//! +16  entries u32  quantidade de entradas da tabela
-//! +20  rsvd    u32  = 0
-//! +24  crc     u32  CRC-32 do arquivo inteiro com este campo zerado
-//! +28  rsvd    u32  = 0
-//! +32  table   entries x 24 bytes:
-//!        kind      u32  1 = kernel (ELF), 2 = initramfs (USTAR)
-//!        flags     u32  reservado, 0
-//!        offset    u64  início do payload
-//!        size      u64  tamanho do payload
-//! ```
-//!
-//! O membro `kernel` deve vir primeiro: é ele que o Limine carrega e no qual
-//! salta. O `initramfs` é o segundo módulo de boot (raiz volátil). O leitor do
-//! lado do kernel vive em `boot/dzimage.rs`; as duas pontas usam as mesmas
-//! constantes (magic, versão, header, kinds) e o mesmo CRC-32.
-//!
-//! Uso:
-//!
-//! ```text
-//!   dzimage pack --kernel K.elf [--initramfs initramfs.tar] -o dzImage
-//!   dzimage extract ARCHIVE [KERNEL-OUT] [INITRAMFS-OUT]
-//!   dzimage info ARCHIVE
-//! ```
+//! Compilado diretamente pelo Makefile do DNU com `std` para produzir o
+//! binário `.build/dzimage`, usado para empacotar/extrair o contêiner dzImage.
+//! Delega a leitura/validação do contêiner ao módulo em `src/dzimage.rs`
+//! (compatível com `no_std`) e adiciona aqui as operações de I/O de arquivo
+//! que exigem `std`.
 
 use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-// O formato é lido pelo kernel com `src/dzimage.rs`; a ferramenta inclui o
-// mesmo módulo para a validação (`verify`) e a tabela de membros
-// (`for_each_member`) serem exatamente as do boot.
 #[path = "src/dzimage.rs"]
-#[allow(dead_code)]
 mod dzimage;
+#[path = "src/util/mod.rs"]
+mod util;
 
-pub const MAGIC: &[u8; 8] = b"DZIMAGE\0";
-pub const VERSION: u32 = 2;
-pub const HEADER_SIZE: usize = 32;
-const ENTRY_SIZE: usize = 24;
-pub const KIND_KERNEL: u32 = 1;
-pub const KIND_INITRAMFS: u32 = 2;
-
-pub fn kind_name(kind: u32) -> &'static str {
-    match kind {
-        KIND_KERNEL => "kernel",
-        KIND_INITRAMFS => "initramfs",
-        _ => "invalid",
-    }
-}
-
-fn align8(value: usize) -> usize {
-    value.div_ceil(8) * 8
-}
-
-/// CRC-32 (IEEE 802.3), o mesmo algoritmo do descompactador do kernel.
-pub fn crc32(bytes: &[u8]) -> u32 {
-    let mut checksum = !0u32;
-    for &byte in bytes {
-        checksum ^= byte as u32;
-        for _ in 0..8 {
-            checksum = (checksum >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(checksum & 1)));
-        }
-    }
-    !checksum
-}
-
-
+use dzimage::{
+    align8, crc32, for_each_member, get_u32, get_u64, header_abi, kind_name, KIND_INITRAMFS,
+    KIND_KERNEL, MAGIC, VERSION,
+};
 
 fn put_u32(out: &mut [u8], value: u32) {
     out[..4].copy_from_slice(&value.to_le_bytes());
@@ -86,44 +28,51 @@ fn put_u64(out: &mut [u8], value: u64) {
     out[..8].copy_from_slice(&value.to_le_bytes());
 }
 
-pub fn get_u32(input: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(input.get(offset..offset + 4)?.try_into().ok()?))
-}
-
-pub fn get_u64(input: &[u8], offset: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(input.get(offset..offset + 8)?.try_into().ok()?))
-}
-
-struct Member {
-    kind: u32,
-    data: Vec<u8>,
-}
-
-impl Member {
-    fn file(kind: u32, path: &str) -> Result<Self, String> {
-        let data = fs::read(path).map_err(|error| format!("cannot read {path}: {error}"))?;
-        Ok(Self { kind, data })
-    }
-}
-
 fn pack(arguments: &mut impl Iterator<Item = String>) -> Result<(), String> {
-    let mut kernel: Option<Member> = None;
-    let mut initramfs: Option<Member> = None;
+    let mut kernel: Option<dzimage::Member> = None;
+    let mut initramfs: Option<dzimage::Member> = None;
     let mut output: Option<String> = None;
     let mut abi = 0u32;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--kernel" => {
                 let path = arguments.next().ok_or("--kernel needs a path")?;
-                let member = Member::file(KIND_KERNEL, &path)?;
-                if member.data.get(..4) != Some(b"\x7fELF") {
+                let data: &'static [u8] = Box::leak(
+                    fs::read(&path).map_err(|e| {
+                        let mut s = String::from("cannot read ");
+                        s.push_str(&path);
+                        s.push_str(": ");
+                        s.push_str(&e.to_string());
+                        s
+                    })?.into_boxed_slice()
+                );
+                if data.get(..4) != Some(b"\x7fELF") {
                     return Err(format!("{path} is not a kernel ELF"));
                 }
-                kernel = Some(member);
+                kernel = Some(dzimage::Member::from_data(
+                    KIND_KERNEL,
+                    0,
+                    data.len() as u64,
+                    data,
+                ));
             }
             "--initramfs" => {
                 let path = arguments.next().ok_or("--initramfs needs a path")?;
-                initramfs = Some(Member::file(KIND_INITRAMFS, &path)?);
+                let data: &'static [u8] = Box::leak(
+                    fs::read(&path).map_err(|e| {
+                        let mut s = String::from("cannot read ");
+                        s.push_str(&path);
+                        s.push_str(": ");
+                        s.push_str(&e.to_string());
+                        s
+                    })?.into_boxed_slice()
+                );
+                initramfs = Some(dzimage::Member::from_data(
+                    KIND_INITRAMFS,
+                    0,
+                    data.len() as u64,
+                    data,
+                ));
             }
             "--abi" => {
                 let value = arguments.next().ok_or("--abi needs a number")?;
@@ -143,7 +92,7 @@ fn pack(arguments: &mut impl Iterator<Item = String>) -> Result<(), String> {
         members.push(initramfs);
     }
 
-    let table_end = HEADER_SIZE + members.len() * ENTRY_SIZE;
+    let table_end = dzimage::HEADER_SIZE + members.len() * 24;
     let mut offsets = Vec::with_capacity(members.len());
     let mut cursor = align8(table_end);
     for member in &members {
@@ -157,7 +106,7 @@ fn pack(arguments: &mut impl Iterator<Item = String>) -> Result<(), String> {
     put_u32(&mut image[12..], abi);
     put_u32(&mut image[16..], members.len() as u32);
     for (index, member) in members.iter().enumerate() {
-        let entry = HEADER_SIZE + index * ENTRY_SIZE;
+        let entry = dzimage::HEADER_SIZE + index * 24;
         put_u32(&mut image[entry..], member.kind);
         put_u32(&mut image[entry + 4..], 0);
         put_u64(&mut image[entry + 8..], offsets[index] as u64);
@@ -178,28 +127,16 @@ fn pack(arguments: &mut impl Iterator<Item = String>) -> Result<(), String> {
     Ok(())
 }
 
-/// Leitura da tabela delegada ao módulo do kernel (`src/dzimage.rs`): a
-/// ferramenta e o boot leem o contêiner com o mesmo código, e `verify` confere
-/// o CRC antes de qualquer extração.
-struct Entries(Vec<dzimage::Member>);
-
-fn read_entries(image: &[u8]) -> Result<(u32, Entries), String> {
-    let abi = dzimage::header_abi(image).ok_or("truncated dzImage")? as u64;
-    dzimage::verify(image, abi).map_err(|error| format!("bad dzImage: {error:?}"))?;
+fn read_entries(image: &[u8]) -> Result<(u32, Vec<dzimage::Member>), String> {
+    let abi = header_abi(image).ok_or("truncated dzImage")? as u64;
+    verify_image(image, abi)?;
     let mut members = Vec::new();
-    let (abi, _) = dzimage::for_each_member(image, |member| members.push(member))
-        .ok_or("truncated dzImage")?;
-    Ok((abi, Entries(members)))
+    for_each_member(image, |member| members.push(member));
+    Ok((abi as u32, members))
 }
 
-impl Entries {
-    fn find(&self, kind: u32) -> Option<&dzimage::Member> {
-        self.0.iter().find(|member| member.kind == kind)
-    }
-
-    fn iter(&self) -> impl Iterator<Item = &dzimage::Member> {
-        self.0.iter()
-    }
+fn verify_image(image: &[u8], abi: u64) -> Result<(), String> {
+    dzimage::verify(image, abi)
 }
 
 fn extract(arguments: &mut impl Iterator<Item = String>) -> Result<(), String> {
@@ -207,18 +144,18 @@ fn extract(arguments: &mut impl Iterator<Item = String>) -> Result<(), String> {
     let kernel_output = arguments.next();
     let initramfs_output = arguments.next();
     let image = fs::read(&archive).map_err(|error| format!("cannot read {archive}: {error}"))?;
-    let (_, entries) = read_entries(&image)?;
-    for (kind, output) in [
-        (KIND_KERNEL, kernel_output),
-        (KIND_INITRAMFS, initramfs_output),
-    ] {
+    let (_, members) = read_entries(&image)?;
+    for member in &members {
+        let kind_name = kind_name(member.kind);
+        let output = match kind_name {
+            "kernel" => kernel_output.as_deref(),
+            "initramfs" => initramfs_output.as_deref(),
+            _ => continue,
+        };
         let Some(output) = output else { continue };
-        let member = entries
-            .find(kind)
-            .ok_or_else(|| format!("dzImage has no {} member", kind_name(kind)))?;
-        fs::write(&output, member.payload(&image))
+        fs::write(output, member.payload(&image))
             .map_err(|error| format!("cannot write {output}: {error}"))?;
-        println!("{}: {output}", kind_name(kind));
+        println!("{kind_name}: {output}");
     }
     Ok(())
 }
@@ -226,17 +163,17 @@ fn extract(arguments: &mut impl Iterator<Item = String>) -> Result<(), String> {
 fn info(arguments: &mut impl Iterator<Item = String>) -> Result<(), String> {
     let archive = arguments.next().ok_or("info needs a dzImage path")?;
     let image = fs::read(&archive).map_err(|error| format!("cannot read {archive}: {error}"))?;
-    let (abi, entries) = read_entries(&image)?;
+    let (abi, members) = read_entries(&image)?;
     let expected = get_u32(&image, 24).ok_or("truncated header")?;
     let mut copy = image.clone();
-    put_u32(&mut copy[24..], 0);
+    copy[24..28].fill(0);
     let status = if crc32(&copy) == expected {
         "ok"
     } else {
         "CORRUPT"
     };
     println!("dzImage {archive}: {status}, ABI {abi}");
-    for member in entries.iter() {
+    for member in &members {
         println!(
             "  {:<9} offset {:<10} size {}",
             kind_name(member.kind),
@@ -253,11 +190,13 @@ fn run() -> Result<(), String> {
         Some("pack") => pack(&mut arguments),
         Some("extract") => extract(&mut arguments),
         Some("info") => info(&mut arguments),
-        _ => Err(concat!(
-            "usage: dzimage pack --kernel K [--initramfs R] [--abi N] -o dzImage",
-            " | dzimage extract ARCHIVE [KERNEL] [INITRAMFS] | dzimage info ARCHIVE"
-        )
-        .to_owned()),
+        _ => Err(
+            concat!(
+                "usage: dzimage pack --kernel K [--initramfs R] [--abi N] -o dzImage",
+                " | dzimage extract ARCHIVE [KERNEL] [INITRAMFS] | dzimage info ARCHIVE"
+            )
+            .to_owned(),
+        ),
     }
 }
 
@@ -273,10 +212,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        crc32, get_u32, pack, read_entries, HEADER_SIZE, KIND_INITRAMFS, KIND_KERNEL, MAGIC,
-        VERSION,
-    };
+    use super::*;
     use std::path::PathBuf;
 
     struct Scratch(PathBuf);
@@ -347,15 +283,14 @@ mod tests {
         zeroed[24..28].fill(0);
         assert_eq!(crc32(&zeroed), stored, "checksum covers the whole file");
 
-        let (abi, entries) = read_entries(&image).unwrap();
+        let (abi, members) = read_entries(&image).unwrap();
         assert_eq!(abi, 7);
-        let members: Vec<_> = entries.iter().collect();
         assert_eq!(members.len(), 2);
         assert_eq!(members[0].kind, KIND_KERNEL);
         assert_eq!(members[0].payload(&image), ELF);
         assert_eq!(members[1].kind, KIND_INITRAMFS);
         assert_eq!(members[1].payload(&image), INITRAMFS);
-        assert!(HEADER_SIZE < members[0].offset, "payloads follow the table");
+        assert!(dzimage::HEADER_SIZE < members[0].offset, "payloads follow the table");
         assert_eq!(members[0].offset % 8, 0, "payloads are 8-byte aligned");
         assert_eq!(members[1].offset % 8, 0, "payloads are 8-byte aligned");
     }
@@ -365,9 +300,9 @@ mod tests {
         let scratch = Scratch::new("kernel-only");
         let kernel = scratch.file("kernel.elf", ELF);
         let image = pack_files(&scratch, &kernel, None).unwrap();
-        let (_, entries) = read_entries(&image).unwrap();
-        assert_eq!(entries.iter().count(), 1);
-        assert_eq!(entries.iter().next().map(|member| member.kind), Some(KIND_KERNEL));
+        let (_, members) = read_entries(&image).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].kind, KIND_KERNEL);
     }
 
     #[test]
@@ -382,10 +317,10 @@ mod tests {
         let scratch = Scratch::new("truncated");
         let kernel = scratch.file("kernel.elf", ELF);
         let image = pack_files(&scratch, &kernel, None).unwrap();
-        assert!(read_entries(&image[..HEADER_SIZE - 1]).is_err());
+        assert!(read_entries(&image[..dzimage::HEADER_SIZE - 1]).is_err());
         assert!(read_entries(b"GARBAGE! and more bytes").is_err());
         let mut truncated = image;
-        truncated.truncate(HEADER_SIZE + 8);
+        truncated.truncate(dzimage::HEADER_SIZE + 8);
         assert!(read_entries(&truncated).is_err());
     }
 

@@ -38,6 +38,8 @@ pub enum Subsystem {
     Configuration = 8,
     /// O primeiro processo (PID 1, init) carregado e pronto para rodar.
     InitProcess = 9,
+    /// Alocador de heap global com suporte a alloc/dealloc completo.
+    Allocator = 10,
 }
 
 impl Subsystem {
@@ -54,6 +56,7 @@ impl Subsystem {
             Self::Dfs => "dfs",
             Self::Configuration => "config",
             Self::InitProcess => "init",
+            Self::Allocator => "allocator",
         }
     }
 
@@ -68,9 +71,10 @@ impl Subsystem {
     }
 
     /// Todos os subsistemas, na ordem de inicialização.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::DescriptorTables,
         Self::Memory,
+        Self::Allocator,
         Self::Console,
         Self::Timer,
         Self::Acpi,

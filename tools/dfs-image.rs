@@ -13,6 +13,8 @@ mod dzimage;
 mod dfs;
 #[path = "../src/gpt.rs"]
 mod gpt;
+#[path = "../src/util/mod.rs"]
+mod util;
 
 mod ata {
     use crate::block::{BlockDevice, BlockError, SECTOR_SIZE};
