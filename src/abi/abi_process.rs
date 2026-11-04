@@ -35,6 +35,7 @@ pub fn exec_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
 /// O sexto argumento (`r9`) não é usado: o ambiente viaja dentro de `SpawnIo`
 /// porque os seis registradores já estão ocupados.
 pub fn spawn_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
+    crate::console_write_bytes(b"spawn_handler CALLED!\r\n");
     // O caminho nunca excede a ABI de exec, então um buffer de 128 bytes basta.
     let mut path_buffer = [0u8; MAX_EXEC_ITEM_SIZE];
     let path_length = frame.rsi;
@@ -45,9 +46,6 @@ pub fn spawn_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
         };
         if length == 0 || length > path_buffer.len() {
             return frame.fail(EINVAL);
-        }
-        if !process::copy_from_current_user(frame.rdi, &mut path_buffer[..length]) {
-            return frame.fail(EFAULT);
         }
         match core::str::from_utf8(&path_buffer[..length]) {
             Ok(path) => path,

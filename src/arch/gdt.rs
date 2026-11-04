@@ -74,7 +74,7 @@ pub fn init() {
         | ((tss_limit & 0x000f_0000) << 32)
         | ((tss_base & 0xff00_0000) << 32);
     tables.gdt[4] = tss_base >> 32;
-    tables.gdt[5] = 0x00af_fa00_0000_ffff;
+    tables.gdt[5] = 0x00cf_fa00_0000_ffff; // código de usuário em modo de compatibilidade (32-bit)
     tables.gdt[6] = 0x00cf_f200_0000_ffff;
 
     let pointer = DescriptorTablePointer {

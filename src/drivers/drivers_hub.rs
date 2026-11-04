@@ -21,3 +21,5 @@ pub mod input;
 pub mod video;
 #[path = "drv_platform.rs"]
 pub mod platform;
+#[path = "ata.rs"]
+pub mod ata;

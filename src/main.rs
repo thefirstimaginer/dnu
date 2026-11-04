@@ -6,9 +6,15 @@
 // mantemos o estilo legado de contrato-por-função até uma revisão completa.
 #![allow(unsafe_op_in_unsafe_fn)]
 use core::arch::asm;
+use limine::memory_map::EntryType;
 use core::panic::PanicInfo;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
+
+unsafe extern "C" {
+    static _ebss: u8;
+    static _end: u8;
+}
 
 // Grafo do kernel: cada `mod` declara suas folhas com #[path] relativo a ele.
 // Apenas main.rs, linker.ld e linker_direct.ld permanecem na raiz de src/.
@@ -126,6 +132,13 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
     unsafe {
         asm!("cli", options(nomem, nostack));
     }
+    // Debug: escrever diretamente na porta serial 0x3F8 via I/O (funciona desde o primeiro ciclo)
+    unsafe {
+        let msg: &[u8] = b"KERNEL ENTRY\r\n";
+        for &byte in msg {
+            asm!("out dx, al", in("dx") 0x3f8u16, in("al") byte, options(nomem, nostack));
+        }
+    }
     fpu::init();
 
     uart::init();
@@ -139,29 +152,84 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
     gdt::init();
     idt::init();
     subsystems::mark_ready(Subsystem::DescriptorTables);
+    crate::serial_write(b"step: desc tables ready\r\n");
 
-    let frame_count = memory::init(
-        unsafe { boot_info.memory_entries() },
-        boot_info.hhdm_offset,
-        unsafe { boot_info.reserved() },
-    );
+    let entries = unsafe { boot_info.memory_entries() };
+    crate::serial_write(b"step: mmap copied\r\n");
+    crate::serial_write(b"step: about to call memory::init\r\n");
+    memory::set_hhdm_offset(boot_info.hhdm_offset);
+    let frame_count = memory::init(entries, boot_info.hhdm_offset, &[]);
+    crate::serial_write(b"step: memory init done\r\n");
+    subsystems::mark_ready(Subsystem::Memory);
+    // Mapeia explicitamente as páginas do .bss (zero-init) que o Limine não
+    // alocou porque o segmento PT_LOAD tem p_filesz == p_memsz. Sem isto,
+    // qualquer acesso a variáveis estáticas no .bss causaria page fault.
+    unsafe {
+        let bss_start = &_ebss as *const u8 as u64;
+        let bss_end = &_end as *const u8 as u64;
+        if bss_end > bss_start {
+            let bss_len = bss_end - bss_start;
+            let mapped = crate::paging::map_hhdm_range(
+                boot_info.hhdm_offset,
+                bss_start,
+                bss_len as usize,
+                true,
+            );
+            if !mapped {
+                crate::halt();
+            }
+        }
+    }
     let Some(boot_frame) = memory::allocate_frame() else {
         console_write("No usable physical frames\n");
         crate::halt();
     };
-    unsafe {
-        core::ptr::write_bytes(boot_frame.virtual_address, 0, 4096);
-    }
     subsystems::mark_ready(Subsystem::Memory);
     // Inicializa o alocador global (GlobalAlloc) antes de qualquer uso de Box/Vec/String.
     unsafe {
         allocator::allocator_init();
     }
     subsystems::mark_ready(Subsystem::Allocator);
+    // Inicializa o framebuffer do Limine. O endereço físico reportado pelo
+    // Limine precisa ser mapeado no espaço virtual do kernel (via HHDM) antes
+    // de ser acessado, caso contrário causaria page fault. O mapeamento é
+    // somente leitura/gravação, sem bit de usuário — é memória de vídeo do kernel.
+    if let Some(fb) = (!boot_info.framebuffer.is_null())
+        .then(|| unsafe { &*boot_info.framebuffer })
+        .and_then(|response| response.framebuffers().next())
+    {
+        let fb_addr = fb.addr() as u64;
+        let fb_len = (fb.pitch() as u64).saturating_mul(fb.height() as u64);
+        crate::serial_write(b"fb: addr=0x");
+        let mut hex = [0u8; 16];
+        let mut n = 0;
+        let mut v = fb_addr;
+        if v == 0 { hex[n] = b'0'; n += 1; }
+        while v > 0 { hex[n] = b'0' + (v % 16) as u8; if hex[n] > b'9' { hex[n] += 7; } n += 1; v /= 16; }
+        for i in (0..n).rev() { crate::serial_write(&hex[i..i+1]); }
+        crate::serial_write(b" len=0x");
+        let mut n = 0;
+        let mut v = fb_len;
+        if v == 0 { hex[n] = b'0'; n += 1; }
+        while v > 0 { hex[n] = b'0' + (v % 16) as u8; if hex[n] > b'9' { hex[n] += 7; } n += 1; v /= 16; }
+        for i in (0..n).rev() { crate::serial_write(&hex[i..i+1]); }
+        crate::serial_write(b"\r\n");
+        let mapped = crate::paging::map_hhdm_range(
+            boot_info.hhdm_offset,
+            fb_addr,
+            fb_len as usize,
+            true,
+        );
+        crate::serial_write(b"fb map: ");
+        crate::serial_write(if mapped { b"ok\r\n" } else { b"fail\r\n" });
+    } else {
+        crate::serial_write(b"fb: none\n");
+    }
     framebuffer::init(
         (!boot_info.framebuffer.is_null())
             .then(|| unsafe { &*boot_info.framebuffer })
             .and_then(|response| response.framebuffers().next()),
+        boot_info.hhdm_offset,
     );
     // O servidor de display precisa do endereço físico da memória de vídeo,
     // que é obtido subtraindo o HHDM do ponteiro virtual do framebuffer.
@@ -191,10 +259,14 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
         distro::init_from_bytes(settings);
     }
 
-    // Sistema inicia direto na GUI — não abre shell/login.
-    // O sistema permanece na área de trabalho até o desligamento.
-    loop {
-        unsafe { asm!("hlt", options(nomem, nostack)); }
+    // Inicia o userspace (PID 1) se todos os subsistemas obrigatórios estiverem prontos.
+    if subsystems::all_required_ready() {
+        console_write("Boot: all required subsystems ready; starting userspace init\n");
+        start_init();
+    } else {
+        console_write("Boot: some required subsystems are NOT ready; halting\n");
+        subsystems::report();
+        crate::halt();
     }
 }
 
@@ -228,8 +300,10 @@ fn report_clock() {
 fn probe_storage() -> bool {
     let Some(sectors) = drivers::block::init() else {
         console_write("No usable ATA primary-master disk; continuing without storage\n");
+        subsystems::mark_unavailable(Subsystem::Storage);
         return false;
     };
+    subsystems::mark_ready(Subsystem::Storage);
     console_write("ATA primary master ready; sectors: ");
     console_number(sectors);
     console_write("\n");
@@ -305,12 +379,13 @@ fn load_font() {
 
 /// Carrega `/sbin/init` como PID 1 e entra em ring 3.
 fn start_init() -> ! {
+    console_write("start_init: loading /sbin/init as PID 1\n");
     let Some(init_program) = ramfs::read("/sbin/init") else {
         kernel_panic("required /sbin/init not found in the active root filesystem\n");
     };
-    console_write("Loading /sbin/init as PID 1 in ring 3\n");
+    console_write("start_init: /sbin/init found; entering DEF loader\n");
     if process::init(&[(init_program, 1)]).is_err() {
-        console_write("DEF loader failed; stopping safely\n");
+        console_write("start_init: DEF loader failed; stopping safely\n");
         crate::halt();
     }
     subsystems::mark_ready(Subsystem::InitProcess);

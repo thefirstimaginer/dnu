@@ -249,12 +249,18 @@ struct HeapSpace(UnsafeCell<[u8; HEAP_SIZE]>);
 
 unsafe impl Sync for HeapSpace {}
 
+/// Heap estático do kernel, colocado em `.data` para garantir que o Limine
+/// alocar páginas para ele (já que o .bss não recebe páginas alocadas quando
+/// p_filesz == p_memsz no segmento PT_LOAD).
+#[unsafe(link_section = ".data")]
 static HEAP_SPACE: HeapSpace = HeapSpace(UnsafeCell::new([0; HEAP_SIZE]));
 
 // Única instância global do allocador. Usada como #[global_allocator] e
 // inicializada via allocator_init() (usando cast de ponteiro para obter
-// acesso mutável durante a inicialização de boot).
+// acesso mutável durante a inicialização de boot). Colocada em `.data` para
+// garantir que o Limine alocar páginas para ela.
 #[global_allocator]
+#[unsafe(link_section = ".data")]
 static GLOBAL_ALLOC: LinkedListAllocator = LinkedListAllocator {
     head: UnsafeCell::new(None),
     total_size: UnsafeCell::new(0),

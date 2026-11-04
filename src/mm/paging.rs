@@ -9,7 +9,17 @@ const ENTRY_USER: u64 = 1 << 2;
 const ENTRY_HUGE: u64 = 1 << 7;
 /// Bit NX (No-Execute): desativa a execução de código nesta página.
 const ENTRY_NX: u64 = 1 << 63;
-const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+/// Máscara de endereço físico válido em entradas de tabela de páginas (bits 0:51, alinhado à página).
+///
+/// Bits 52:62 são reservados em x86-64 e devem ser zero em todas as entradas
+/// de tabela de páginas (PML4, PDPT, PD, PTE). Bit 63 (NX) é controlado
+/// explicitamente pelas flags da página.
+const PHYS_ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
+/// Máscara de bits válidos em uma entrada de tabela de página: mantém flags
+/// (bits 0:11), endereço físico (bits 12:51) e NX (bit 63), limpando bits
+/// reservados (52:62) que causam #PF com error code RSVD (bit 3).
+const ENTRY_VALID_MASK: u64 = 0x800f_ffff_ffff_f0ff;
+const ADDRESS_MASK: u64 = PHYS_ADDR_MASK;
 const USER_MIN: u64 = 0x400000;
 const USER_MAX: u64 = 0x0000_8000_0000_0000;
 
@@ -131,7 +141,7 @@ impl AddressSpace {
                 unsafe {
                     ptr::write_bytes(frame.virtual_address, 0, PAGE_SIZE as usize);
                 }
-                *entry = frame.physical_address | ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER;
+                *entry = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER;
             } else {
                 *entry |= ENTRY_WRITABLE | ENTRY_USER;
             }
@@ -151,7 +161,7 @@ impl AddressSpace {
         unsafe {
             ptr::write_bytes(frame.virtual_address, 0, PAGE_SIZE as usize);
         }
-        *entry = frame.physical_address | ENTRY_PRESENT | ENTRY_USER | flags.entry_bits();
+        *entry = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_USER | flags.entry_bits();
         Ok(frame.virtual_address)
     }
 
@@ -374,7 +384,7 @@ impl AddressSpace {
             unsafe {
                 ptr::write_bytes(frame.virtual_address, 0, PAGE_SIZE as usize);
             }
-            *destination_entry = frame.physical_address | ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER;
+            *destination_entry = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER;
         }
         let next_destination = *destination_entry & ADDRESS_MASK;
         let mut copied = 0usize;
@@ -459,7 +469,7 @@ pub fn map_framebuffer_range(
                 unsafe {
                     ptr::write_bytes(frame.virtual_address, 0, PAGE_SIZE as usize);
                 }
-                *entry = frame.physical_address | ENTRY_PRESENT | ENTRY_USER;
+                *entry = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_USER;
             } else {
                 *entry |= ENTRY_USER;
             }
@@ -467,11 +477,16 @@ pub fn map_framebuffer_range(
         }
         let table = table_pointer(table_physical)?;
         let entry = unsafe { &mut *table.add(indices[3]) };
+        // Valida que o endereço físico não tem bits reservados (52:62) antes de
+        // gravar na PTE. Um bit reservado setado causa #PF com error code RSVD.
+        if physical_address & !PHYS_ADDR_MASK != 0 {
+            return None;
+        }
         let mut bits = ENTRY_PRESENT | ENTRY_USER | ENTRY_NX;
         if writable {
             bits |= ENTRY_WRITABLE;
         }
-        *entry = physical_address | bits;
+        *entry = (physical_address & PHYS_ADDR_MASK) | bits;
         memory::phys_to_virt(physical_address)
     }
 
@@ -612,7 +627,7 @@ fn map_hhdm_page(virtual_address: u64, physical_address: u64, writable: bool) ->
             unsafe {
                 ptr::write_bytes(frame.virtual_address, 0, PAGE_SIZE as usize);
             }
-            *entry = frame.physical_address | ENTRY_PRESENT | ENTRY_WRITABLE;
+            *entry = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_WRITABLE;
         } else if level > 0 && *entry & ENTRY_HUGE != 0 {
             return true;
         }
@@ -623,6 +638,12 @@ fn map_hhdm_page(virtual_address: u64, physical_address: u64, writable: bool) ->
         return false;
     };
     let entry = unsafe { &mut *table.add(indices[3]) };
+    // Garante que o endereço físico não tenha bits reservados (52:62) antes de
+    // escrever na entrada da tabela de páginas. Um bit reservado setado causa
+    // #PF com error code bit 3 (RSVD) em qualquer acesso que traduz essa entrada.
+    if physical_address & !PHYS_ADDR_MASK != 0 {
+        return false;
+    }
     if *entry & ENTRY_PRESENT != 0 {
         // Atualiza permissões: garante escrita se solicitado.
         if writable {
@@ -633,7 +654,7 @@ fn map_hhdm_page(virtual_address: u64, physical_address: u64, writable: bool) ->
         }
         return *entry & ADDRESS_MASK == physical_address;
     }
-    *entry = physical_address | ENTRY_PRESENT | ENTRY_WRITABLE;
+    *entry = (physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_WRITABLE;
     unsafe {
         asm!("invlpg [{}]", in(reg) virtual_address, options(nostack, preserves_flags));
     }
@@ -650,4 +671,125 @@ fn read_cr3() -> u64 {
 
 fn table_pointer(physical: u64) -> Option<*mut u64> {
     Some(memory::phys_to_virt(physical)?.cast())
+}
+
+/// Navega pelas tabelas de páginas para o endereço virtual informado e limpa
+/// bits reservados (52:62) de todas as entradas encontradas no caminho.
+///
+/// O Limine pode configurar entradas de tabela de páginas com bits reservados
+/// setados, o que causa #PF com error code bit 3 (RSVD) em qualquer acesso que
+/// traduza essas entradas. Esta função varre as tabelas para o range de endereços
+/// virtuais do kernel e corrige as entradas, preservando os bits de controle
+/// (present, writable, user, NX, etc.) e apenas removendo bits que o hardware
+/// considera reservados.
+///
+/// É chamada cedo no boot, antes de acessar qualquer dado estático que possa
+/// residir em uma página com entrada corrompida.
+/// Navega pelas tabelas de páginas para o range de endereços virtuais do
+/// kernel e limpa bits reservados (52:62) de todas as entradas encontradas.
+///
+/// O `hhdm_offset` é usado para converter endereços físicos de tabelas de
+/// páginas em endereços virtuais acessíveis pelo kernel.
+///
+/// O Limine pode configurar entradas de tabela de páginas com bits reservados
+/// setados, o que causa #PF com error code bit 3 (RSVD) em qualquer acesso que
+/// traduza essas entradas. Esta função varre as tabelas para o range de
+/// endereços virtuais do kernel e corrige as entradas, preservando os bits de
+/// controle (present, writable, user, NX, etc.) e apenas removendo bits que o
+/// hardware considera reservados.
+///
+/// É chamada cedo no boot, antes de acessar qualquer dado estático que possa
+/// residir em uma página com entrada corrompida.
+pub fn fix_kernel_page_table_entries(hhdm_offset: u64, virtual_start: u64, virtual_end: u64) {
+    let root_physical = read_cr3() & ADDRESS_MASK;
+    let mut address = virtual_start & !(PAGE_SIZE - 1);
+    let mut fixed = 0u64;
+    let mut mapped = 0u64;
+    let mut scanned = 0u64;
+    while address < virtual_end {
+        let indices = [
+            ((address >> 39) & 0x1ff) as usize,
+            ((address >> 30) & 0x1ff) as usize,
+            ((address >> 21) & 0x1ff) as usize,
+            ((address >> 12) & 0x1ff) as usize,
+        ];
+        let mut table_physical = root_physical;
+        let mut ok = true;
+        // Navega pelas tabelas intermediarias (PML4 -> PDPT -> PD -> PT).
+        // Se alguma tabela intermediaria estiver ausente, pula esta pagina.
+        for index in indices.iter().take(3) {
+            let Some(table_phys) = table_physical.checked_add(hhdm_offset) else {
+                ok = false;
+                break;
+            };
+            let table_ptr = unsafe { (table_phys as *mut u64).as_mut() };
+            let Some(table) = table_ptr else {
+                ok = false;
+                break;
+            };
+            let table = unsafe { core::slice::from_raw_parts_mut(table as *mut u64, 512) };
+            let entry = unsafe { &mut table[*index] };
+            if *entry & ENTRY_PRESENT == 0 {
+                ok = false;
+                break;
+            }
+            let old = *entry;
+            *entry &= ENTRY_VALID_MASK;
+            if old != *entry { fixed += 1; }
+            table_physical = *entry & ADDRESS_MASK;
+        }
+        if ok {
+            let Some(table_phys) = table_physical.checked_add(hhdm_offset) else {
+                address = address.checked_add(PAGE_SIZE).unwrap_or(u64::MAX);
+                continue;
+            };
+            let table_ptr = unsafe { (table_phys as *mut u64).as_mut() };
+            let Some(table) = table_ptr else {
+                address = address.checked_add(PAGE_SIZE).unwrap_or(u64::MAX);
+                continue;
+            };
+            let table = unsafe { core::slice::from_raw_parts_mut(table as *mut u64, 512) };
+            let entry = unsafe { &mut table[indices[3]] };
+            if *entry & ENTRY_PRESENT == 0 {
+                // PTE ausente: aloca um frame zeroed e mapeia para este
+                // endereço. Isso cobre paginas do .bss que o Limine nao alocou.
+                let Some(frame) = memory::allocate_frame() else {
+                    address = address.checked_add(PAGE_SIZE).unwrap_or(u64::MAX);
+                    continue;
+                };
+                unsafe {
+                    core::ptr::write_bytes(frame.virtual_address, 0, PAGE_SIZE as usize);
+                }
+                *entry = (frame.physical_address & PHYS_ADDR_MASK)
+                    | ENTRY_PRESENT | ENTRY_WRITABLE;
+                mapped += 1;
+            } else {
+                let old = *entry;
+                *entry &= ENTRY_VALID_MASK;
+                if old != *entry { fixed += 1; }
+            }
+        }
+        scanned += 1;
+        address = address.checked_add(PAGE_SIZE).unwrap_or(u64::MAX);
+    }
+    crate::serial_write(b"fix_paging: scanned=");
+    let mut buf = [0u8; 16];
+    let mut n = 0;
+    let mut v = scanned;
+    if v == 0 { buf[n] = b'0'; n += 1; }
+    while v > 0 { buf[n] = b'0' + (v % 10) as u8; n += 1; v /= 10; }
+    for i in (0..n).rev() { crate::serial_write(&buf[i..i+1]); }
+    crate::serial_write(b" fixed=");
+    let mut n = 0;
+    let mut v = fixed;
+    if v == 0 { buf[n] = b'0'; n += 1; }
+    while v > 0 { buf[n] = b'0' + (v % 10) as u8; n += 1; v /= 10; }
+    for i in (0..n).rev() { crate::serial_write(&buf[i..i+1]); }
+    crate::serial_write(b" mapped=");
+    let mut n = 0;
+    let mut v = mapped;
+    if v == 0 { buf[n] = b'0'; n += 1; }
+    while v > 0 { buf[n] = b'0' + (v % 10) as u8; n += 1; v /= 10; }
+    for i in (0..n).rev() { crate::serial_write(&buf[i..i+1]); }
+    crate::serial_write(b"\r\n");
 }

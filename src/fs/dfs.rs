@@ -1268,26 +1268,26 @@ fn decode_node(sector: &[u8; NODE_SIZE]) -> Result<Node, DfsError> {
 }
 
 fn transaction_checksum(transaction: &Transaction) -> u32 {
-    let mut crc = !0u32;
+    let mut crc32 = !0u32;
     for index in 0..transaction.count {
-        crc = crc32_update(crc, &transaction.targets[index].to_le_bytes());
-        crc = crc32_update(crc, &transaction.data[index]);
+        crc32 = crc32_update(crc32, &transaction.targets[index].to_le_bytes());
+        crc32 = crc32_update(crc32, &transaction.data[index]);
     }
-    !crc
+    !crc32
 }
 
 fn crc32(bytes: &[u8]) -> u32 {
     !crc32_update(!0, bytes)
 }
 
-fn crc32_update(mut crc: u32, bytes: &[u8]) -> u32 {
+fn crc32_update(mut crc32: u32, bytes: &[u8]) -> u32 {
     for byte in bytes {
-        crc ^= *byte as u32;
+        crc32 ^= *byte as u32;
         for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(crc & 1)));
+            crc32 = (crc32 >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(crc32 & 1)));
         }
     }
-    crc
+    crc32
 }
 
 fn set_bit(bitmap: &mut [u8; SECTOR_SIZE], bit: usize, value: bool) {

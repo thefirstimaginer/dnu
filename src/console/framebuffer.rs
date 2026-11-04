@@ -95,7 +95,7 @@ pub(crate) fn set_active(active: bool) {
     console.active = active;
 }
 
-pub fn init(framebuffer: Option<Framebuffer<'_>>) {
+pub fn init(framebuffer: Option<Framebuffer<'_>>, hhdm_offset: u64) {
     let Some(framebuffer) = framebuffer else {
         return;
     };
@@ -103,7 +103,13 @@ pub fn init(framebuffer: Option<Framebuffer<'_>>) {
         return;
     }
     let console = unsafe { &mut *CONSOLE.0.get() };
-    console.address = framebuffer.addr();
+    // O Limine reporta o endereço físico da memória de vídeo. Converte para
+    // virtual usando o deslocamento HHDM antes de armazenar, para que acessos
+    // posteriores (pixel, write_char, etc.) traduzam corretamente pelas tabelas
+    // de páginas.
+    let physical = framebuffer.addr() as u64;
+    let virtual_address = physical.checked_add(hhdm_offset).unwrap_or(physical);
+    console.address = virtual_address as *mut u8;
     console.width = framebuffer.width() as usize;
     console.height = framebuffer.height() as usize;
     console.pitch = framebuffer.pitch() as usize;

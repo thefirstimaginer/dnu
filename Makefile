@@ -47,6 +47,7 @@ DZIMAGE_BIN   := $(BUILD_DIR)/tools/dzimage
 DNUDEBUG_BIN  := $(BUILD_DIR)/tools/dnudebug
 DNUTEST_BIN   := $(BUILD_DIR)/tools/dnutest
 DNUBOOT_BIN   := $(BUILD_DIR)/tools/dnuboot
+DNU_PACK_BIN  := $(BUILD_DIR)/tools/dnu_pack
 
 # Fonte PSF embarcada no kernel.
 FONT := $(ROOT)/src/assets/zap-vga16.psf
@@ -91,7 +92,7 @@ $(KERNEL_DIRECT): $(shell find $(ROOT)/src -name '*.rs') $(ROOT)/src/linker_dire
 # ------------------------------------------------------------------------------
 # Ferramentas de host (dzimage, dnudebug, dnutest, dnuboot)
 # ------------------------------------------------------------------------------
-tools: $(DZIMAGE_BIN) $(DNUDEBUG_BIN) $(DNUTEST_BIN) $(DNUBOOT_BIN)
+tools: $(DZIMAGE_BIN) $(DNUDEBUG_BIN) $(DNUTEST_BIN) $(DNUBOOT_BIN) $(DNU_PACK_BIN)
 
 $(DZIMAGE_BIN): $(ROOT)/tools/dzimage_host.rs $(ROOT)/src/boot/dzimage.rs
 	@mkdir -p $(BUILD_DIR)/tools
@@ -111,6 +112,11 @@ $(DNUTEST_BIN): $(ROOT)/tools/dnutest.rs
 $(DNUBOOT_BIN): $(ROOT)/tools/dnuboot.rs $(ROOT)/src/boot/dzimage.rs
 	@mkdir -p $(BUILD_DIR)/tools
 	$(CARGO_RUSTC) --edition 2021 --crate-type bin --crate-name dnuboot \
+		-C panic=abort $< -o $@
+
+$(DNU_PACK_BIN): $(ROOT)/tools/dnu-pack.rs $(ROOT)/src/boot/dzimage.rs
+	@mkdir -p $(BUILD_DIR)/tools
+	$(CARGO_RUSTC) --edition 2021 --crate-type bin --crate-name dnu_pack \
 		-C panic=abort $< -o $@
 
 # ------------------------------------------------------------------------------
@@ -154,8 +160,20 @@ provisional: $(DZIMAGE_BIN) $(KERNEL)
 	@mkdir -p $(BUILD_DIR)
 	$(DZIMAGE_BIN) pack --kernel $(KERNEL) --abi $(ABI_VERSION) -o $(DZ_IMAGE)
 
-$(DZ_IMAGE): $(KERNEL) $(DZIMAGE_BIN) $(RAMFS_TAR) FORCE
-	@if [ -f $(RAMFS_TAR) ]; then \
+# O dzImage deve sempre conter o kernel linkado com src/linker.ld (endereço
+# alto, exigido pelo Limine). Se o usuário executou `make kernel-direct`
+# antes, o ELF em target/ ficou com endereço baixo (0x100000). Forçamos a
+# recompilação do kernel modo Limine antes de empacotar, evitando o panic
+# "Lower half PHDRs are not allowed" no boot da ISO.
+#
+# O dzImage contém APENAS o kernel ELF, sem initramfs. O initramfs é gerado
+# como arquivo separado (initrd) pelo orquestrador de build do ImagineOS
+# (imagine-tools/build/kernel.py), não aqui. O initramfs.tar só é montado
+# quando RAMFS_DIR é informado explicitamente e não vazio.
+$(DZ_IMAGE): $(DZIMAGE_BIN) FORCE
+	@touch $(ROOT)/src/main.rs
+	@$(MAKE) --no-print-directory kernel
+	@if [ -n "$(RAMFS_DIR)" ]; then \
 		$(DZIMAGE_BIN) pack --kernel $(KERNEL) --initramfs $(RAMFS_TAR) \
 			--abi $(ABI_VERSION) -o $@; \
 	else \

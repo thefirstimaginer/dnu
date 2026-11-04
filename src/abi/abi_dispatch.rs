@@ -14,7 +14,7 @@ use crate::abi::{
     SYS_READ, SYS_READ_FD, SYS_READ_FILE, SYS_READDIR, SYS_REMOVE, SYS_SBRK, SYS_SHUTDOWN_POLL,
     SYS_SHUTDOWN_REQUEST, SYS_SIGACTION, SYS_SIGRETURN, SYS_SPAWN, SYS_STAT, SYS_SURFACE_CREATE,
     SYS_SURFACE_DESTROY, SYS_SURFACE_FLUSH, SYS_SURFACE_MOVE, SYS_SURFACE_POLL, SYS_SURFACE_PRESENT,
-    SYS_SURFACE_SEND_EVENT, SYS_SURFACE_SNAPSHOT, SYS_SYSTEM_INFO, SYS_SET_TLS,
+    SYS_SURFACE_SEND_EVENT, SYS_SYSTEM_INFO, SYS_SET_TLS,
     SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_TLS_INFO, SYS_TOUCH, SYS_WAITPID, SYS_WRITE,
     SYS_WRITE_FD, SYS_WRITE_FILE, SYS_YIELD,
 };
@@ -25,11 +25,17 @@ use super::process as process_calls;
 use super::thread as thread_calls;
 use super::trap::{TrapFrame, ENOSYS};
 use crate::abi::{display, fs, system};
+use crate::drivers::ata;
 use crate::process;
 
-/// Entrada chamada pelo stub `int 0x80`.
+// Entrada chamada pelo stub `syscall`/`int 0x80`.
 #[unsafe(no_mangle)]
 extern "C" fn dreamcore_syscall_dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
+    crate::console_write_bytes(b"syscall_dispatch: rax=");
+    let rax = unsafe { (*frame).rax };
+    let rax_bytes = rax.to_le_bytes();
+    crate::console_write_bytes(&rax_bytes[..]);
+    crate::console_write_bytes(b"\r\n");
     // Preserva os registradores FPU/SSE do processo que fez a syscall: o kernel
     // Rust pode usar XMM entre aqui e o retorno para o espaço de usuário.
     process::save_current_fpu();
@@ -143,7 +149,7 @@ fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
         SYS_SYSTEM_INFO => system::system_info(frame),
         SYS_GETTIMEOFDAY => system::gettimeofday(frame),
         SYS_DMESG => system::dmesg(frame),
-        SYS_DISK_COUNT => frame.ok(u64::from(crate::ata::is_ready())),
+        SYS_DISK_COUNT => frame.ok(u64::from(ata::is_ready())),
         SYS_DISK_SECTORS => system::disk_sectors(frame),
         SYS_INSTALL_DISK | SYS_INSTALL_DISK_CONFIG => system::install_disk(frame),
         SYS_SHUTDOWN_REQUEST => system::request_shutdown(frame),

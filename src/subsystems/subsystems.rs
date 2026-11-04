@@ -86,6 +86,10 @@ impl Subsystem {
     ];
 }
 
+/// Estado dos subsistemas pronto, colocado na seção `.data` (já mapeada pelo
+/// Limine) para evitar page faults em páginas de `.bss` com entradas de
+/// tabela de páginas contendo bits reservados.
+#[unsafe(link_section = ".data")]
 static READY: AtomicU32 = AtomicU32::new(0);
 
 /// Marca um subsistema como inicializado com sucesso.

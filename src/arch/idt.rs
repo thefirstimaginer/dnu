@@ -83,9 +83,26 @@ dreamcore_exception_common:
 
 .global dreamcore_syscall_stub
 dreamcore_syscall_stub:
+    // Marca que o syscall foi alcançado (escreve 'S' na serial COM1)
+    mov al, 'S'
+    mov dx, 0x3f8
+    call .serial_putc
+    jmp .continue_stub
+.serial_putc:
+    // Espera TX ready
+    mov dx, 0x3fd
+.wait_tx:
+    in al, dx
+    test al, 0x20
+    jz .wait_tx
+    mov dx, 0x3f8
+    mov al, 'S'
+    out dx, al
+    ret
+.continue_stub:
+    // O hardware salva RIP em RCX e RFLAGS em R11 durante SYSCALL.
     push rax
     push rbx
-    push rcx
     push rdx
     push rsi
     push rdi
@@ -93,7 +110,6 @@ dreamcore_syscall_stub:
     push r8
     push r9
     push r10
-    push r11
     push r12
     push r13
     push r14
@@ -106,7 +122,6 @@ dreamcore_syscall_stub:
     pop r14
     pop r13
     pop r12
-    pop r11
     pop r10
     pop r9
     pop r8
@@ -114,10 +129,9 @@ dreamcore_syscall_stub:
     pop rdi
     pop rsi
     pop rdx
-    pop rcx
     pop rbx
     pop rax
-    iretq
+    sysretq
 
 .global dreamcore_timer_interrupt
 dreamcore_timer_interrupt:
@@ -320,6 +334,9 @@ impl IdtEntry {
 
 struct SharedIdt(UnsafeCell<[IdtEntry; 256]>);
 unsafe impl Sync for SharedIdt {}
+
+/// IDT colocada em `.data` para garantir que o Limine alocar páginas para ela.
+#[unsafe(link_section = ".data")]
 static IDT: SharedIdt = SharedIdt(UnsafeCell::new([IdtEntry::MISSING; 256]));
 
 #[repr(C, packed)]
@@ -329,11 +346,13 @@ struct DescriptorTablePointer {
 }
 
 pub fn init() {
+    serial_write(b"step: idt init start\r\n");
     let idt = unsafe { &mut *IDT.0.get() };
     let selector: u16;
     unsafe {
         asm!("mov {0:x}, cs", out(reg) selector, options(nomem, nostack, preserves_flags));
     }
+    serial_write(b"step: idt cs read ok\r\n");
     let handlers = [
         dreamcore_exception_0,
         dreamcore_exception_1,
@@ -372,25 +391,97 @@ pub fn init() {
         let handler = handler as *const () as usize as u64;
         *entry = IdtEntry::interrupt_gate(handler, selector);
     }
+    serial_write(b"step: idt entries filled ok\r\n");
     let timer_handler = dreamcore_timer_interrupt as *const () as usize as u64;
-    // O vetor vem de `time::timer_vector()` (0x20): os vetores 0..=31 são
-    // exceções da CPU e 0x80 é a syscall. Registrar o timer em 0x0e (que é o
-    // `#PF`) fazia o IRQ0 ser despachado como exceção e o handler do timer nunca
-    // rodava — o relógio de ticks ficava em zero e a preempção nunca acontecia.
     idt[crate::time::timer_vector() as usize] =
         IdtEntry::interrupt_gate(timer_handler, selector);
+    serial_write(b"step: idt timer set ok\r\n");
     let syscall_handler = dreamcore_syscall_stub as *const () as usize as u64;
     idt[0x80] = IdtEntry {
         attributes: 0xee,
         ..IdtEntry::interrupt_gate(syscall_handler, selector)
     };
+    serial_write(b"step: idt syscall set ok\r\n");
     let pointer = DescriptorTablePointer {
         limit: (size_of::<[IdtEntry; 256]>() - 1) as u16,
         base: idt.as_ptr() as u64,
     };
+    serial_write(b"step: idt pointer built ok\r\n");
     unsafe {
         asm!("lidt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags));
     }
+    serial_write(b"step: idt lidt done ok\r\n");
+
+    // Configura MSRs para a instrução `syscall` (modo longo x86-64).
+    // IA32_LSTAR: endereço do handler de syscall (ring 0).
+    // IA32_STAR: selector de CS/SS para syscall (bits 47-32 = CS, bits 15-0 = SS).
+    // IA32_FMASK: máscara de flags removidas ao entrar em ring 0.
+    configure_syscall_msrs();
+    serial_write(b"step: idt syscall MSRs ok\r\n");
+}
+
+/// Configura MSRs para suporte à instrução `syscall` em modo longo.
+///
+/// O kernel define o endereço do handler de syscall em IA32_LSTAR e configura
+/// os seletores de segmento em IA32_STAR. Após isso, processos em ring 3 podem
+/// usar `syscall` para invocar syscalls do kernel.
+fn configure_syscall_msrs() {
+    let syscall_stub = dreamcore_syscall_stub as *const () as usize as u64;
+    serial_write(b"step: syscall MSRs start\r\n");
+
+    // IA32_EFER = habilitar SCE (System Call Enable) bit 0 para usar SYSCALL/SYSRET
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") 0xC0000080u32,
+            in("eax") 1u32,
+            in("edx") 0u32,
+            options(nostack)
+        );
+    }
+    serial_write(b"step: syscall EFER ok\r\n");
+
+    // IA32_LSTAR = endereço do handler de syscall
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") 0xC0000082u32,
+            in("eax") syscall_stub as u32,
+            in("edx") (syscall_stub >> 32) as u32,
+            options(nostack)
+        );
+    }
+    serial_write(b"step: syscall LSTAR ok\r\n");
+
+    // IA32_STAR = segmento CS (bits 47-32 = usuário) e SS (bits 15-0 = usuário data).
+    // syscall adiciona 32 automaticamente ao CS (bits 47:32) para formar o CS do modo usuário.
+    // Portanto, para CS do usuário = 0x2b, precisamos de IA32_STAR[47:32] = 0x0b (0x2b - 0x20).
+    let star: u64 = ((0x08u64) << 48) | ((0x0bu64) << 32) | (0x33u64);
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") 0xC0000081u32,
+            in("eax") star as u32,
+            in("edx") (star >> 32) as u32,
+            options(nostack)
+        );
+    }
+    serial_write(b"step: syscall STAR ok\r\n");
+
+    // IA32_FMASK = flags removidas ao entrar em ring 0 (limpar IF, etc.)
+    let fmask: u64 = 0x0000_0000_0000_0000;
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") 0xC0000084u32,
+            in("eax") fmask as u32,
+            in("edx") (fmask >> 32) as u32,
+            options(nostack)
+        );
+    }
+    serial_write(b"step: syscall FMASK ok\r\n");
+
+    serial_write(b"syscall MSRs configured\r\n");
 }
 
 fn serial_write(bytes: &[u8]) {

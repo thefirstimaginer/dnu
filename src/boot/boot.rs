@@ -31,6 +31,10 @@ unsafe extern "C" {
 
 struct BootInfoStorage(core::cell::UnsafeCell<MaybeUninit<BootInfo>>);
 unsafe impl Sync for BootInfoStorage {}
+
+/// Colocado em `.data` para evitar page faults em páginas de `.bss` com bits
+/// reservados nas entradas de tabela de páginas do Limine.
+#[unsafe(link_section = ".data")]
 static BOOT_INFO: BootInfoStorage = BootInfoStorage(core::cell::UnsafeCell::new(MaybeUninit::uninit()));
 
 #[used]
