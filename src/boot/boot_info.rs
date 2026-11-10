@@ -1,6 +1,6 @@
 use limine::{
     memory_map::Entry,
-    response::{FramebufferResponse, MemoryMapResponse, ModuleResponse},
+    response::{FramebufferResponse, ModuleResponse},
 };
 
 #[allow(dead_code)]
@@ -22,7 +22,11 @@ impl PhysicalRange {
 
 #[repr(C)]
 pub struct BootInfo {
-    pub memory_map: *const MemoryMapResponse,
+    /// Ponteiro para array de entradas de mapa de memória (tipo Limine Entry).
+    /// Estas entradas são copiadas da resposta do Limine em boot.rs antes de
+    /// chamar kernel_entry, para evitar depender dos mapeamentos de página do Limine.
+    pub memory_entries: *const Entry,
+    pub memory_entries_count: usize,
     pub framebuffer: *const FramebufferResponse,
     pub modules: *const ModuleResponse,
     pub rsdp_address: u64,
@@ -39,14 +43,13 @@ pub struct BootInfo {
 
 impl BootInfo {
     #[allow(dead_code)]
-    pub unsafe fn memory_entries(&self) -> &[&'static Entry] {
-        // SAFETY: o memory map foi validado pelo Limine no boot.
-        unsafe { (&*self.memory_map).entries() }
+    pub unsafe fn memory_entries(&self) -> &[Entry] {
+        // As entradas são valores Entry em memória acessível via HHDM
+        // (copiadas em boot.rs). Retornamos o slice diretamente.
+        unsafe { core::slice::from_raw_parts(self.memory_entries, self.memory_entries_count) }
     }
     #[allow(dead_code)]
     pub unsafe fn reserved(&self) -> &[PhysicalRange] {
-        // SAFETY: `reserved_ranges`/`reserved_count` valem `0`/nulo quando o
-        // Limine carrega o kernel diretamente (nenhum intervalo extra reservado).
         unsafe { core::slice::from_raw_parts(self.reserved_ranges, self.reserved_count) }
     }
 }

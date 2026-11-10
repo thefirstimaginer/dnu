@@ -17,12 +17,18 @@ use core::mem::MaybeUninit;
 use core::ptr;
 
 use limine::BaseRevision;
+use limine::memory_map::Entry;
 use limine::request::{
-    FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, RsdpRequest,
+    FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, RsdpRequest, StackSizeRequest,
 };
 use limine::response::{FramebufferResponse, MemoryMapResponse, ModuleResponse};
 
 use crate::boot_info::{BootInfo, PhysicalRange, MAX_RESERVED_RANGES};
+
+/// Armazenamento estático para as entradas do memory map do Limine.
+/// Colocado em `.data` para garantir que esteja mapeado e acessível.
+#[unsafe(link_section = ".data")]
+static mut LIMINE_MEMORY_ENTRIES: [Entry; 256] = unsafe { core::mem::zeroed() };
 
 unsafe extern "C" {
     static _initramfs_start: u8;
@@ -55,6 +61,9 @@ static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
+#[used]
+#[unsafe(link_section = ".requests")]
+static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(1024 * 1024);
 
 static EMPTY_RESERVED: [PhysicalRange; 1] = [PhysicalRange::EMPTY];
 
@@ -141,6 +150,17 @@ pub fn limine_start() -> ! {
     // depois do salto, então nenhum intervalo extra é reservado.
     let reserved: &[PhysicalRange] = &EMPTY_RESERVED;
 
+    // Copia as entradas do memory map do Limine para armazenamento estático
+    // acessível via HHDM, para não depender dos mapeamentos de página do Limine.
+    let limine_entries = memory_map.entries();
+    let entries_count = limine_entries.len().min(256);
+    unsafe {
+        for (i, entry) in limine_entries.iter().take(entries_count).enumerate() {
+            LIMINE_MEMORY_ENTRIES[i] = **entry;
+        }
+    }
+    let memory_entries_ptr = unsafe { core::ptr::addr_of!(LIMINE_MEMORY_ENTRIES) as *const Entry };
+
     let tsc_start = crate::time::read_tsc();
     // Frequência do TSC, em três tentativas, da mais barata para a mais lenta:
     //   1. `cpuid` (folhas 0x15/0x16) — exato quando o firmware informa;
@@ -155,7 +175,8 @@ pub fn limine_start() -> ! {
         .unwrap_or(0);
 
     let boot_info = BootInfo {
-        memory_map: memory_map as *const MemoryMapResponse,
+        memory_entries: memory_entries_ptr,
+        memory_entries_count: entries_count,
         framebuffer: FRAMEBUFFER_REQUEST
             .get_response()
             .map_or(ptr::null(), |response| response as *const FramebufferResponse),
@@ -219,7 +240,8 @@ pub fn direct_start() -> ! {
     }
 
     let boot_info = BootInfo {
-        memory_map: ptr::null(), // sem memory map do Limine; valores default
+        memory_entries: ptr::null(),
+        memory_entries_count: 0,
         framebuffer: ptr::null(),
         modules: &module_response as *const DirectModuleResponse as *const ModuleResponse,
         rsdp_address: 0,
