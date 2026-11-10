@@ -51,10 +51,9 @@ impl LogBuffer {
 pub struct SharedLog(UnsafeCell<LogBuffer>);
 unsafe impl Sync for SharedLog {}
 
-/// Log global do kernel, colocado em `.data` para garantir que o Limine
-/// alocar páginas para ele (o .bss não recebe páginas alocadas quando
-/// p_filesz == p_memsz no segmento PT_LOAD).
-#[unsafe(link_section = ".data")]
+/// Log global do kernel, colocado em `.data.early` para garantir que o Limine
+/// alocar páginas para ele no início do segmento .data, sempre mapeado.
+#[unsafe(link_section = ".data.early")]
 pub static KERNEL_LOG: SharedLog = SharedLog(UnsafeCell::new(LogBuffer::new()));
 
 pub fn append(bytes: &[u8]) {

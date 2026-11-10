@@ -85,6 +85,7 @@ impl Console {
 
 struct SharedConsole(UnsafeCell<Console>);
 unsafe impl Sync for SharedConsole {}
+#[unsafe(link_section = ".data.early")]
 static CONSOLE: SharedConsole = SharedConsole(UnsafeCell::new(Console::empty()));
 
 /// Liga o console do kernel na impressão (usado depois que o servidor de
@@ -513,6 +514,7 @@ pub fn description() -> Option<Description> {
 }
 
 /// Guarda o deslocamento do HHDM para converter ponteiros virtuais em físicos.
+#[unsafe(link_section = ".data.early")]
 static mut HHDM_OFFSET: u64 = 0;
 
 fn hhdm_offset() -> u64 {

@@ -60,10 +60,11 @@ impl Subsystem {
         }
     }
 
-    /// Todo subsistema é obrigatório, exceto o DFS: sem partição persistente o
-    /// sistema roda no initramfs.
+    /// Todo subsistema é obrigatório, exceto o DFS (opcional), o InitProcess
+    /// (marcado pronto depois que /sbin/init é carregado) e o Timer
+    /// (inicializado dentro de start_init).
     pub const fn is_required(self) -> bool {
-        !matches!(self, Self::Dfs)
+        !matches!(self, Self::Dfs | Self::InitProcess | Self::Timer)
     }
 
     const fn bit(self) -> u32 {
@@ -86,15 +87,15 @@ impl Subsystem {
     ];
 }
 
-/// Estado dos subsistemas pronto, colocado na seção `.data` (já mapeada pelo
-/// Limine) para evitar page faults em páginas de `.bss` com entradas de
-/// tabela de páginas contendo bits reservados.
-#[unsafe(link_section = ".data")]
+/// Estado dos subsistemas pronto, colocado na seção `.data.early` (início do
+/// segmento `.data`, sempre mapeado pelo Limine) para evitar page faults.
+#[unsafe(link_section = ".data.early")]
 static READY: AtomicU32 = AtomicU32::new(0);
 
 /// Marca um subsistema como inicializado com sucesso.
 pub fn mark_ready(subsystem: Subsystem) {
-    READY.fetch_or(subsystem.bit(), Ordering::Relaxed);
+    let old = READY.load(Ordering::Relaxed);
+    READY.store(old | subsystem.bit(), Ordering::Relaxed);
 }
 
 /// Marca um subsistema como indisponível (falhou ou não existe neste boot).
@@ -108,9 +109,16 @@ pub fn is_ready(subsystem: Subsystem) -> bool {
 
 /// Verdadeiro quando todos os subsistemas obrigatórios subiram.
 pub fn all_required_ready() -> bool {
-    Subsystem::ALL
-        .iter()
-        .all(|subsystem| !subsystem.is_required() || is_ready(*subsystem))
+    let mut all_ready = true;
+    for subsystem in Subsystem::ALL {
+        if subsystem.is_required() && !is_ready(subsystem) {
+            crate::serial_write(b"subsystem NOT ready: ");
+            crate::serial_write(subsystem.label().as_bytes());
+            crate::serial_write(b"\r\n");
+            all_ready = false;
+        }
+    }
+    all_ready
 }
 
 /// Escreve uma linha por subsistema e um resumo final.

@@ -13,18 +13,25 @@ SECTIONS
 {
     . = KERNEL_VMA;
 
-    .text : ALIGN(4096) { *(.text .text.*) } :text
+    .text : ALIGN(4096) { 
+        *(.text .text.*) 
+        *(.text.*) 
+    } :text
     .rodata : ALIGN(4096) { *(.rodata .rodata.*) } :rodata
     .data : ALIGN(4096) { 
+        *(.data.early .data.early.*) 
         *(.got .got.*) 
         *(.data .data.*) 
         _edata = .; 
-        /* Force the allocator into .data section */
-        . = ALIGN(4096);
-        *(.data.ALLOCATOR)
+        /* Ensure the entire .data segment is mapped by forcing p_filesz = p_memsz */
+        .fill 0x200000, 1, 0
     } :data
-    .bss : ALIGN(4096) { *(COMMON) *(.bss .bss.*) _ebss = .; } :bss
-    .bss_pad : ALIGN(4096) { . = _ebss + 0x1000000; _end = .; } :bss
+    .bss : ALIGN(4096) { 
+        *(COMMON) *(.bss .bss.*) 
+        _ebss = .; 
+        /* Ensure the heap (HEAP_SPACE in .bss) is mapped by forcing p_filesz = p_memsz */
+        .fill 0x400000, 1, 0
+    } :bss
 
     /DISCARD/ : { *(.eh_frame .eh_frame_hdr) }
 }

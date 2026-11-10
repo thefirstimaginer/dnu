@@ -305,25 +305,29 @@ impl Scheduler {
 
 pub(crate) struct SharedScheduler(pub(crate) UnsafeCell<Scheduler>);
 unsafe impl Sync for SharedScheduler {}
+#[unsafe(link_section = ".data.early")]
 pub(crate) static SCHEDULER: SharedScheduler = SharedScheduler(UnsafeCell::new(Scheduler::new()));
 
 pub fn init(programs: &[(&[u8], usize)]) -> Result<(), LoadError> {
-    debug_log("process: initializing scheduler\n");
+    crate::serial_write(b"process: init: start\n");
     let scheduler = unsafe { &mut *SCHEDULER.0.get() };
+    crate::serial_write(b"process: init: scheduler ptr=0x");
+    crate::serial_write_hex(SCHEDULER.0.get() as u64);
+    crate::serial_write(b"\r\n");
     scheduler.processes = [Process::EMPTY; MAX_PROCESSES];
     scheduler.count = 0;
     scheduler.current = 0;
+    crate::serial_write(b"process: init: scheduler reset\n");
     descriptors::reset_all();
+    crate::serial_write(b"process: init: descriptors reset\n");
 
     for &(image, pid) in programs.iter().take(MAX_PROCESSES) {
-        #[cfg(feature = "kernel-debug")]
-        {
-            crate::console_write("process: loading PID ");
-            crate::console_write_number(pid as u64);
-            crate::console_write(" DEF\n");
-        }
+        crate::serial_write(b"process: init: loading PID ");
+        crate::serial_write_hex(pid as u64);
+        crate::serial_write(b"\r\n");
         let slot = scheduler.count;
         let arguments: [&[u8]; 1] = [b"/sbin/init"];
+        crate::serial_write(b"process: init: calling loader::load\n");
         let process = load(
             image,
             pid,
@@ -334,12 +338,14 @@ pub fn init(programs: &[(&[u8], usize)]) -> Result<(), LoadError> {
             "/sbin/init",
             loader::ProcessCredentials::ROOT,
         )?;
+        crate::serial_write(b"process: init: loader::load ok\n");
         scheduler.processes[scheduler.count] = process;
         scheduler.count += 1;
     }
     if scheduler.count == 0 {
         return Err(LoadError::EmptyPrograms);
     }
+    crate::serial_write(b"process: init: done\n");
     Ok(())
 }
 
@@ -390,14 +396,27 @@ fn load(
 
 
 pub fn start() -> ! {
+    crate::serial_write(b"process: start: entering ring 3\n");
     let scheduler = unsafe { &mut *SCHEDULER.0.get() };
     let process = scheduler.processes[0];
     scheduler.current = 0;
     let address_space = process.address_space.expect("process address space");
+    crate::serial_write(b"process: start: address_space=0x");
+    crate::serial_write_hex(address_space.root_physical);
+    crate::serial_write(b" frame=0x");
+    crate::serial_write_hex(process.frame as u64);
+    crate::serial_write(b"\r\n");
     let kernel_stack_top =
         unsafe { (*KERNEL_STACKS.0.get()).0[0].as_ptr() as u64 + KERNEL_STACK_SIZE as u64 };
     gdt::set_kernel_stack(kernel_stack_top);
+    crate::serial_write(b"process: start: switching to user address space\n");
     paging::switch(address_space);
+    crate::serial_write(b"process: start: address space switched, executing iretq\n");
+    crate::serial_write(b"process: start: RIP=0x");
+    crate::serial_write_hex(unsafe { (*process.frame).rip });
+    crate::serial_write(b" RSP=0x");
+    crate::serial_write_hex(unsafe { (*process.frame).rsp });
+    crate::serial_write(b"\r\n");
     unsafe {
         asm!(
             "mov rsp, {frame}",
@@ -1262,12 +1281,19 @@ pub fn execve_current(
             return frame;
         }
     }
+    crate::serial_write(b"execve: ramfs::read(\"");
+    crate::serial_write(path.as_bytes());
+    crate::serial_write(b")\r\n");
     let Some(image) = crate::ramfs::read(path) else {
+        crate::serial_write(b"execve: ramfs::read failed\r\n");
         unsafe {
             (*frame).rax = (-2i64) as u64;
         }
         return frame;
     };
+    crate::serial_write(b"execve: ramfs::read ok, bytes=");
+    crate::serial_write_hex(image.len() as u64);
+    crate::serial_write(b")\r\n");
 
     let (slot, pid, process, execve_creds) = {
         let scheduler = unsafe { &*SCHEDULER.0.get() };
@@ -1283,7 +1309,7 @@ pub fn execve_current(
     };
 
     // `loader::load` monta o novo `TrapFrame` no **topo** da pilha de kernel do
-    // slot. Isso colide com o frame do `int 0x80` que está ativo agora, porque
+    // slot. Isso colide com o frame do `syscall` que está ativo agora, porque
     // o `execve` roda no mesmo slot do processo que vai ser substituído
     // (diferente do `spawn`, que usa outro slot). Escrevemos o frame novo na
     // **base** da pilha de kernel, longe o bastante do topo para não sobrepor
@@ -1365,12 +1391,19 @@ pub fn spawn_current_with_io(
         }
         return frame;
     }
+    crate::serial_write(b"spawn: ramfs::read(\"");
+    crate::serial_write(path.as_bytes());
+    crate::serial_write(b")\r\n");
     let Some(image) = crate::ramfs::read(path) else {
+        crate::serial_write(b"spawn: ramfs::read failed\r\n");
         unsafe {
             (*frame).rax = (-2i64) as u64;
         }
         return frame;
     };
+    crate::serial_write(b"spawn: ramfs::read ok, bytes=");
+    crate::serial_write_hex(image.len() as u64);
+    crate::serial_write(b"\r\n");
 
     let (slot, pid, parent_slot, parent_creds) = {
         let scheduler = unsafe { &*SCHEDULER.0.get() };
@@ -1658,8 +1691,8 @@ pub fn waitpid_current(frame: *mut TrapFrame, pid: i64, status_pointer: u64, opt
         // pai continuar rodando** (sem trocar de contexto aqui).
         //
         // Trocar de processo dentro do `waitpid` não funciona: o stub do
-        // `int 0x80` faz `iretq` para o frame devolvido, o userspace retoma
-        // logo **após** o `int 0x80` — ou seja, o laço do `waitpid` no kernel
+        // `syscall` faz `iretq` para o frame devolvido, o userspace retoma
+        // logo **após** o `syscall` — ou seja, o laço do `waitpid` no kernel
         // seria abandonado com a pilha de kernel suja, e o pai acharia que o
         // `waitpid` terminou sem ter coletado o filho (foi assim que os zumbis
         // se acumularam até esgotar os slots).

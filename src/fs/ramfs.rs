@@ -66,7 +66,7 @@ impl OverlayNode {
 }
 
 const MAX_OVERLAY_NODES: usize = 128;
-const OVERLAY_DATA_CAPACITY: usize = 8 * 1024 * 1024;
+const OVERLAY_DATA_CAPACITY: usize = 64 * 1024;
 
 struct RamFs {
     archive: Option<Archive<'static>>,
@@ -92,6 +92,11 @@ impl<'a> Archive<'a> {
     }
 
     pub fn find(&self, wanted: &str) -> Option<&'a [u8]> {
+        crate::serial_write(b"ramfs::Archive::find: bytes.ptr=0x");
+        crate::serial_write_hex(self.bytes.as_ptr() as u64);
+        crate::serial_write(b" len=");
+        crate::serial_write_hex(self.bytes.len() as u64);
+        crate::serial_write(b"\r\n");
         let wanted = wanted.trim_start_matches('/');
         let mut offset = 0usize;
 
@@ -103,6 +108,35 @@ impl<'a> Archive<'a> {
 
             let name = field(&header[..100]);
             let prefix = field(&header[345..500]);
+            let size = parse_octal(&header[124..136])?;
+            let data_start = offset.checked_add(BLOCK_SIZE)?;
+            let data_end = data_start.checked_add(size)?;
+            if data_end > self.bytes.len() {
+                return None;
+            }
+            crate::serial_write(b"ramfs scan: offset=0x");
+            crate::serial_write_hex(offset as u64);
+            crate::serial_write(b" name=\"");
+            crate::serial_write(name);
+            crate::serial_write(b"\" prefix=\"");
+            crate::serial_write(prefix);
+            crate::serial_write(b"\" type=0x");
+            crate::serial_write_hex(header[156] as u64);
+            crate::serial_write(b" size=0x");
+            crate::serial_write_hex(size as u64);
+            crate::serial_write(b" sizebytes=");
+            crate::serial_write(&header[124..136]);
+            crate::serial_write(b"\r\n");
+            if name == b"ws_server" {
+                crate::serial_write(b"ramfs scan: FOUND ws_server! data_start=0x");
+                crate::serial_write_hex(data_start as u64);
+                crate::serial_write(b" data_end=0x");
+                crate::serial_write_hex(data_end as u64);
+                crate::serial_write(b" self.bytes.len=");
+                crate::serial_write_hex(self.bytes.len() as u64);
+                crate::serial_write(b"\r\n");
+            }
+
             let path_matches = if prefix.is_empty() {
                 name == wanted.as_bytes()
             } else {
@@ -114,28 +148,20 @@ impl<'a> Archive<'a> {
                             .is_some_and(|rest| rest.as_bytes() == name)
                     })
             };
-            let size = parse_octal(&header[124..136])?;
-            let data_start = offset.checked_add(BLOCK_SIZE)?;
-            let data_end = data_start.checked_add(size)?;
-            if data_end > self.bytes.len() {
-                return None;
-            }
             if path_matches && (header[156] == 0 || header[156] == b'0') {
-                #[cfg(feature = "kernel-debug")]
-                {
-                    crate::serial_log_timestamp();
-                    crate::serial_write(b"find: \"");
-                    crate::serial_write(wanted.as_bytes());
-                    crate::serial_write(b"\" name=\"");
-                    crate::serial_write(name);
-                    crate::serial_write(b"\" prefix=\"");
-                    crate::serial_write(prefix);
-                    crate::serial_write(b"\" type=");
-                    crate::serial_write_number(header[156] as u64);
-                    crate::serial_write(b" size=");
-                    crate::serial_write_number(size as u64);
-                    crate::serial_write(b"\n");
-                }
+                crate::serial_write(b"ramfs find: matched \"");
+                crate::serial_write(wanted.as_bytes());
+                crate::serial_write(b"\" name=\"");
+                crate::serial_write(name);
+                crate::serial_write(b"\" prefix=\"");
+                crate::serial_write(prefix);
+                crate::serial_write(b"\" size=0x");
+                crate::serial_write_hex(size as u64);
+                crate::serial_write(b" data_start=0x");
+                crate::serial_write_hex(data_start as u64);
+                crate::serial_write(b" first4: ");
+                crate::serial_write(&self.bytes[data_start..data_start.min(data_start + 4)]);
+                crate::serial_write(b"\r\n");
                 return Some(&self.bytes[data_start..data_end]);
             }
 
@@ -375,6 +401,7 @@ impl<'a> Archive<'a> {
 
 struct SharedRamFs(UnsafeCell<RamFs>);
 unsafe impl Sync for SharedRamFs {}
+#[unsafe(link_section = ".data.early")]
 static MOUNTED_RAMFS: SharedRamFs = SharedRamFs(UnsafeCell::new(RamFs::new()));
 static BLOCK_DISK_PRESENT: AtomicBool = AtomicBool::new(false);
 
@@ -402,7 +429,13 @@ pub fn read(path: &str) -> Option<&'static [u8]> {
 /// This is the backend body used by [`crate::vfs`]; it never consults the DFS
 /// root, and every helper it calls is an `*_overlay` variant for that reason.
 pub fn read_from_overlay(path: &str) -> Option<&'static [u8]> {
+    crate::serial_write(b"ramfs::read_from_overlay(\"");
+    crate::serial_write(path.as_bytes());
+    crate::serial_write(b")\r\n");
     let fs = unsafe { &*MOUNTED_RAMFS.0.get() };
+    crate::serial_write(b"ramfs::read_from_overlay: fs.archive=");
+    crate::serial_write(if fs.archive.is_some() { b"some" } else { b"none" });
+    crate::serial_write(b"\r\n");
     let path = canonical_path(path)?;
     if is_hidden(fs, path) {
         return None;
