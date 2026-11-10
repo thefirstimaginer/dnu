@@ -31,7 +31,7 @@ use trap_impl::TrapFrame;
 #[test]
 fn trap_frame_matches_the_int_stub_push_order() {
     // Ordem dos `push` em `dreamcore_syscall_stub` (do último para o primeiro),
-    // seguida do frame que o CPU empilha no `int 0x80`.
+    // seguida do frame que o CPU empilha no `syscall`.
     let expected = [
         (offset_of!(TrapFrame, r15), 0),
         (offset_of!(TrapFrame, r14), 1),

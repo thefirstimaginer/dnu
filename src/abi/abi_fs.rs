@@ -366,7 +366,7 @@ pub fn stat(frame: &mut TrapFrame) -> *mut TrapFrame {
 /// `write_file(path, len, buf, size)`: substitui o conteúdo inteiro.
 ///
 /// O tamanho viaja no **quarto** argumento, que a ABI entrega em `r10` (o `rcx`
-/// é reservado pelo `int 0x80` para o endereço de retorno). A libc (`__dc_write_file`)
+/// é reservado pelo `syscall` para o endereço de retorno). A libc (`__dc_write_file`)
 /// e o runtime Rust usam o mesmo registrador, por isso a leitura é fixa aqui.
 pub fn write_file(frame: &mut TrapFrame) -> *mut TrapFrame {
     let mut path_buffer = [0u8; MAX_MUTABLE_PATH];

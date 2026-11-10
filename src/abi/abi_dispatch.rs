@@ -28,9 +28,11 @@ use crate::abi::{display, fs, system};
 use crate::drivers::ata;
 use crate::process;
 
-// Entrada chamada pelo stub `syscall`/`int 0x80`.
+// Entrada chamada pelo stub `syscall`.
 #[unsafe(no_mangle)]
 extern "C" fn dreamcore_syscall_dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
+    // Diagnóstico direto via UART para confirmar entrada no handler.
+    crate::console::serial::write(b"SD:enter\n");
     crate::console_write_bytes(b"syscall_dispatch: rax=");
     let rax = unsafe { (*frame).rax };
     let rax_bytes = rax.to_le_bytes();

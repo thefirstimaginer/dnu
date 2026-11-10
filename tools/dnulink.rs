@@ -33,7 +33,7 @@ use std::process::{exit, Command};
 // não consome o `.rlib` só-de-metadados do `build.rs` do crate dela.
 #[path = "abi.rs"]
 mod abi;
-use crate::abi::imagineos_abi::{def, ABI_VERSION};
+use crate::abi::{def, ABI_VERSION};
 use def::{
     validate_image, DefArch, DefCapability, DefFlags, DefHeader, DefPermissions, DefSegment,
     DefType, DEF_FORMAT_VERSION, DEF_HEADER_SIZE, DEF_MAGIC, DEF_MAX_SEGMENTS, DEF_SEGMENT_SIZE,
@@ -358,7 +358,7 @@ fn split_output(args: &[String]) -> (Vec<String>, Option<PathBuf>) {
 /// Caminho para a musl portada (por padrão, relativo ao próprio `dnulink`).
 ///
 /// A `std` chama funções POSIX (`write`, `pthread_create`, `free`...) que o
-/// shim `libc` declara e a musl implementa sobre `int 0x80`. Sem esta lib, o
+/// shim `libc` declara e a musl implementa sobre `syscall`. Sem esta lib, o
 /// link falha com símbolos indefinidos.
 /// Stub de unwinding/errno (ver `std-dreamcore/unwind-stub.c`).
 ///

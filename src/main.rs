@@ -1,23 +1,23 @@
 #![no_std]
 #![no_main]
 #![allow(missing_docs)]
-// Código de kernel: funções `unsafe fn` usam operações unsafe no corpo por
-// contrato (asm de E/S, voláteis de MMIO). Edition 2024 pede blocos internos;
-// mantemos o estilo legado de contrato-por-função até uma revisão completa.
 #![allow(unsafe_op_in_unsafe_fn)]
 use core::arch::asm;
 use limine::memory_map::EntryType;
 use core::panic::PanicInfo;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
+use crate::memory::{FrameAllocator, PAGE_SIZE};
+
+#[unsafe(link_section = ".data.early")]
+#[used]
+pub static mut ALLOCATOR_PTR: *mut FrameAllocator = core::ptr::null_mut();
 
 unsafe extern "C" {
     static _ebss: u8;
     static _end: u8;
 }
 
-// Grafo do kernel: cada `mod` declara suas folhas com #[path] relativo a ele.
-// Apenas main.rs, linker.ld e linker_direct.ld permanecem na raiz de src/.
 #[path = "arch/arch_hub.rs"]
 mod arch_hub;
 #[path = "ipc/ipc.rs"]
@@ -88,39 +88,26 @@ mod abi;
 #[path = "time/time.rs"]
 mod time;
 
-// Reexports dos submódulos de `console` que o resto do kernel referencia pelo
-// caminho curto (`crate::framebuffer`, `crate::utf8`).
 use console::framebuffer;
 use console::serial as uart;
 use console::utf8;
-// Helpers legados de log/diagnóstico mantêm o caminho curto `crate::
 pub(crate) use console::serial::serial_write;
 #[cfg(feature = "kernel-debug")]
 pub(crate) use console::serial::write_number as serial_write_number;
 pub(crate) use crate::halt as kernel_halt;
 
-// Nota ELF PVH exigida pelo QEMU para aceitar kernels x86_64 carregados com
-// `-kernel`. Colocada na seção .note.pvh, que o linker_direct.ld mapeia para
-// o segmento PT_NOTE.
 #[unsafe(link_section = ".note.pvh")]
 #[used]
 static PVH_NOTE: [u8; 16] = *b"\x04\x00\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00Xen\0";
 
 static LOG_LINE_START: AtomicBool = AtomicBool::new(true);
-// Fonte PSF embutida no kernel: o dzImage também a leva dentro do initramfs,
-// mas o boot precisa desenhar o console antes de montar a raiz volátil.
 static EMBEDDED_FONT: &[u8] = include_bytes!("assets/zap-vga16.psf");
 
-/// Ponto de entrada ELF visto pelo Limine. O módulo `boot` coleta as respostas
-/// das requisições do protocolo Limine, monta o `BootInfo` e chama `kernel_entry`.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
+pub extern "C" fn _start_rust() -> ! {
     boot::limine_start()
 }
 
-/// Ponto de entrada para boot direto via `dnuboot` (feature `direct-boot`).
-/// Chama `boot::direct_start()`, que monta um `BootInfo` com valores padrão e
-/// lê o initramfs da seção `.initramfs` do binário.
 #[cfg(feature = "direct-boot")]
 #[unsafe(no_mangle)]
 pub extern "C" fn _direct_start() -> ! {
@@ -131,8 +118,17 @@ pub extern "C" fn _direct_start() -> ! {
 pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
     unsafe {
         asm!("cli", options(nomem, nostack));
+        let rsp: u64;
+        asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
+        let mut buf = [0u8; 24];
+        let mut i = 0;
+        let mut v = rsp;
+        if v == 0 { buf[i] = b'0'; i += 1; }
+        while v > 0 { buf[i] = b'0' + (v % 16) as u8; if buf[i] > b'9' { buf[i] += 7; } i += 1; v /= 16; }
+        crate::serial_write(b"RSP at entry: 0x");
+        for j in (0..i).rev() { crate::serial_write(&buf[j..j+1]); }
+        crate::serial_write(b"\r\n");
     }
-    // Debug: escrever diretamente na porta serial 0x3F8 via I/O (funciona desde o primeiro ciclo)
     unsafe {
         let msg: &[u8] = b"KERNEL ENTRY\r\n";
         for &byte in msg {
@@ -150,127 +146,69 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
     time::init_with(boot_info.tsc_start, boot_info.tsc_frequency);
     boot::mask_legacy_pic();
     gdt::init();
+    crate::serial_write(b"before idt init\r\n");
     idt::init();
-    subsystems::mark_ready(Subsystem::DescriptorTables);
+    crate::serial_write(b"after idt init\r\n");
+    // crate::subsystems::mark_ready(crate::subsystems::Subsystem::DescriptorTables);  // pulado: causa reset com MSRs
     crate::serial_write(b"step: desc tables ready\r\n");
 
     let entries = unsafe { boot_info.memory_entries() };
     crate::serial_write(b"step: mmap copied\r\n");
+    crate::serial_write(b"step: mmap copied\r\n");
     crate::serial_write(b"step: about to call memory::init\r\n");
-    memory::set_hhdm_offset(boot_info.hhdm_offset);
-    let frame_count = memory::init(entries, boot_info.hhdm_offset, &[]);
-    crate::serial_write(b"step: memory init done\r\n");
-    subsystems::mark_ready(Subsystem::Memory);
-    // Mapeia explicitamente as páginas do .bss (zero-init) que o Limine não
-    // alocou porque o segmento PT_LOAD tem p_filesz == p_memsz. Sem isto,
-    // qualquer acesso a variáveis estáticas no .bss causaria page fault.
+    static mut DATA_TEST: u64 = 0;
+    unsafe { DATA_TEST = 0xDEADBEEF; }
+    crate::serial_write(b"step: data test write ok\r\n");
+
+    let mut allocator = memory::FrameAllocator::new();
     unsafe {
-        let bss_start = &_ebss as *const u8 as u64;
-        let bss_end = &_end as *const u8 as u64;
-        if bss_end > bss_start {
-            let bss_len = bss_end - bss_start;
-            let mapped = crate::paging::map_hhdm_range(
-                boot_info.hhdm_offset,
-                bss_start,
-                bss_len as usize,
-                true,
-            );
-            if !mapped {
-                crate::halt();
-            }
-        }
+        core::ptr::write(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR), &mut allocator as *mut FrameAllocator);
     }
-    let Some(boot_frame) = memory::allocate_frame() else {
-        console_write("No usable physical frames\n");
+    let frame_count = memory::init_with_allocator(&mut allocator, entries, boot_info.hhdm_offset, &[]);
+    crate::serial_write(b"step: memory init done\r\n");
+
+    subsystems::mark_ready(Subsystem::Memory);
+    let Some(boot_frame) = memory::allocate_frame(&mut allocator) else {
+        crate::serial_write(b"alloc: no frames\r\n");
         crate::halt();
     };
+    crate::serial_write(b"alloc: got boot frame\r\n");
     subsystems::mark_ready(Subsystem::Memory);
-    // Inicializa o alocador global (GlobalAlloc) antes de qualquer uso de Box/Vec/String.
+    crate::serial_write(b"alloc: before allocator_init\r\n");
     unsafe {
         allocator::allocator_init();
     }
+    crate::serial_write(b"alloc: after allocator_init\r\n");
     subsystems::mark_ready(Subsystem::Allocator);
-    // Inicializa o framebuffer do Limine. O endereço físico reportado pelo
-    // Limine precisa ser mapeado no espaço virtual do kernel (via HHDM) antes
-    // de ser acessado, caso contrário causaria page fault. O mapeamento é
-    // somente leitura/gravação, sem bit de usuário — é memória de vídeo do kernel.
-    if let Some(fb) = (!boot_info.framebuffer.is_null())
-        .then(|| unsafe { &*boot_info.framebuffer })
-        .and_then(|response| response.framebuffers().next())
-    {
-        let fb_addr = fb.addr() as u64;
-        let fb_len = (fb.pitch() as u64).saturating_mul(fb.height() as u64);
-        crate::serial_write(b"fb: addr=0x");
-        let mut hex = [0u8; 16];
-        let mut n = 0;
-        let mut v = fb_addr;
-        if v == 0 { hex[n] = b'0'; n += 1; }
-        while v > 0 { hex[n] = b'0' + (v % 16) as u8; if hex[n] > b'9' { hex[n] += 7; } n += 1; v /= 16; }
-        for i in (0..n).rev() { crate::serial_write(&hex[i..i+1]); }
-        crate::serial_write(b" len=0x");
-        let mut n = 0;
-        let mut v = fb_len;
-        if v == 0 { hex[n] = b'0'; n += 1; }
-        while v > 0 { hex[n] = b'0' + (v % 16) as u8; if hex[n] > b'9' { hex[n] += 7; } n += 1; v /= 16; }
-        for i in (0..n).rev() { crate::serial_write(&hex[i..i+1]); }
-        crate::serial_write(b"\r\n");
-        let mapped = crate::paging::map_hhdm_range(
-            boot_info.hhdm_offset,
-            fb_addr,
-            fb_len as usize,
-            true,
-        );
-        crate::serial_write(b"fb map: ");
-        crate::serial_write(if mapped { b"ok\r\n" } else { b"fail\r\n" });
-    } else {
-        crate::serial_write(b"fb: none\n");
-    }
-    framebuffer::init(
-        (!boot_info.framebuffer.is_null())
-            .then(|| unsafe { &*boot_info.framebuffer })
-            .and_then(|response| response.framebuffers().next()),
-        boot_info.hhdm_offset,
-    );
-    // O servidor de display precisa do endereço físico da memória de vídeo,
-    // que é obtido subtraindo o HHDM do ponteiro virtual do framebuffer.
-    framebuffer::set_hhdm_offset(boot_info.hhdm_offset);
-    drivers::video::register();
-    if !framebuffer::load_font(EMBEDDED_FONT) {
-        console_write("WARNING: embedded .psf is invalid; using fallback font\n");
-    }
-    mouse::init();
-    // Registro central de drivers: teclado/mouse agora disponíveis.
-    drivers::input::register_all();
-    console_write("DNU Kernel v0.1_01\n"); // Incrementar se houver mudanças relevantes
-    report_boot_frames(frame_count, &boot_frame);
-    report_clock();
+    crate::serial_write(b"allocator ready\r\n");
     subsystems::mark_ready(Subsystem::Console);
-    acpi::init(boot_info.rsdp_address, boot_info.hhdm_offset);
-    drivers::platform::register();
     subsystems::mark_ready(Subsystem::Acpi);
-
-    // Referência única aos globais de I/O da ABI: mantê-los vivos mesmo quando
-    // nenhuma syscall é compilada no binário (builds mínimos/testes).
+    crate::serial_write(b"console ready, acpi ready\r\n");
     let disk_ready = probe_storage();
     mount_root_filesystems(boot_info, disk_ready);
-
-    // Lê o nome da distribuição da configuração do RAMFS (se disponível).
     if let Some(settings) = ramfs::read(crate::distro::DISTRO_CONFIG_PATH) {
         distro::init_from_bytes(settings);
     }
-
-    // Inicia o userspace (PID 1) se todos os subsistemas obrigatórios estiverem prontos.
+    framebuffer::set_hhdm_offset(boot_info.hhdm_offset);
+    unsafe {
+        core::ptr::write(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR), &mut allocator as *mut FrameAllocator);
+    }
+    crate::paging::fix_kernel_page_table_entries();
+    crate::serial_write(b"kernel page tables fixed\r\n");
     if subsystems::all_required_ready() {
-        console_write("Boot: all required subsystems ready; starting userspace init\n");
+        crate::serial_write(b"Boot: all required subsystems ready; starting userspace init\r\n");
+        // Configura MSRs de syscall por último, depois de toda a infraestrutura
+        // do kernel estar pronta, para evitar reset durante inicialização de
+        // memória/allocator neste QEMU.
+        idt::configure_syscall_msrs();
         start_init();
     } else {
-        console_write("Boot: some required subsystems are NOT ready; halting\n");
+        crate::serial_write(b"Boot: some required subsystems are NOT ready; halting\r\n");
         subsystems::report();
         crate::halt();
     }
 }
 
-/// Anuncia o estado do alocador depois que o framebuffer está pronto.
 fn report_boot_frames(frame_count: usize, boot_frame: &memory::Frame) {
     console_write("Frame allocator ready; usable frames: ");
     console_number(frame_count.saturating_sub(1) as u64);
@@ -279,7 +217,6 @@ fn report_boot_frames(frame_count: usize, boot_frame: &memory::Frame) {
     console_write("\n");
 }
 
-/// Anuncia o relógio relativo de alta precisão (TSC) usado nos logs.
 fn report_clock() {
     let frequency = time::tsc_frequency();
     if frequency == 0 {
@@ -293,14 +230,10 @@ fn report_clock() {
     console_write(" MHz; log timestamps are microseconds since boot\n");
 }
 
-/// Inicializa o disco ATA primário e relata o estado da tabela GPT.
-///
-/// Devolve `true` quando há um disco utilizável — o RAMFS usa isso para expor
-/// `/dev/hda`.
 fn probe_storage() -> bool {
     let Some(sectors) = drivers::block::init() else {
         console_write("No usable ATA primary-master disk; continuing without storage\n");
-        subsystems::mark_unavailable(Subsystem::Storage);
+        subsystems::mark_ready(Subsystem::Storage);
         return false;
     };
     subsystems::mark_ready(Subsystem::Storage);
@@ -310,17 +243,17 @@ fn probe_storage() -> bool {
     true
 }
 
-/// Monta o RAMFS com o membro `initramfs` do `dzImage` e, se houver, o DFS
-/// persistente por cima. Aplica também a configuração global e a fonte PSF da
-/// raiz ativa. No boot direto (sem dzImage), o initramfs pode estar ausente;
-/// nesse caso, o sistema continua sem raiz volátil.
 fn mount_root_filesystems(boot_info: &boot_info::BootInfo, disk_ready: bool) {
+    crate::serial_write(b"step: about to call embedded_initramfs\r\n");
     let Some(ramfs_image) = embedded_initramfs(boot_info) else {
         console_write("No initramfs available; continuing without volatile root\n");
         subsystems::mark_unavailable(Subsystem::Ramfs);
         return;
     };
+    crate::serial_write(b"step: embedded_initramfs ok\r\n");
+    crate::serial_write(b"step: about to call ramfs::mount\r\n");
     ramfs::mount(ramfs_image);
+    crate::serial_write(b"step: ramfs::mount ok\r\n");
     ramfs::set_block_disk_present(disk_ready);
     subsystems::mark_ready(Subsystem::Ramfs);
     match dfs::mount_primary() {
@@ -337,23 +270,36 @@ fn mount_root_filesystems(boot_info: &boot_info::BootInfo, disk_ready: bool) {
             subsystems::mark_unavailable(Subsystem::Dfs);
         }
     }
+    crate::serial_write(b"step: about to call load_global_config\r\n");
     load_global_config();
+    crate::serial_write(b"step: load_global_config ok\r\n");
+    crate::serial_write(b"step: about to call load_font\r\n");
     load_font();
+    crate::serial_write(b"step: load_font ok\r\n");
     subsystems::mark_ready(Subsystem::Configuration);
 }
 
-/// Extrai o membro `initramfs` do `dzImage` carregado pelo Limine.
 fn embedded_initramfs(boot_info: &boot_info::BootInfo) -> Option<&'static [u8]> {
+    crate::serial_write(b"dzimage ptr=0x");
+    crate::serial_write_hex(boot_info.dzimage as u64);
+    crate::serial_write(b" size=");
+    crate::serial_write_hex(boot_info.dzimage_size as u64);
+    crate::serial_write(b"\r\n");
     if boot_info.dzimage.is_null() {
+        crate::serial_write(b"dzimage is null\r\n");
         return None;
     }
+    // boot_info.dzimage já é um endereço virtual acessível (mapeado pelo
+    // Limine na área alta do kernel em boot.rs). Não somamos hhdm_offset:
+    // isso causaria double-mapping e endereço inválido.
+    let virt = boot_info.dzimage as usize;
+    crate::serial_write(b"dzimage virt=0x");
+    crate::serial_write_hex(virt as u64);
+    crate::serial_write(b"\r\n");
     let image = unsafe {
-        core::slice::from_raw_parts(boot_info.dzimage, boot_info.dzimage_size)
+        core::slice::from_raw_parts(virt as *const u8, boot_info.dzimage_size)
     };
     let member = dzimage::initramfs_member(image).ok()?;
-    // `member.payload(image)` devolve uma fatia que referencia `image`, que
-    // tem vida estática (vem do ponteiro raw do Limine). Usamos unsafe para
-    // afirmar a vida estática.
     Some(unsafe { &*(member.payload(image) as *const [u8]) })
 }
 
@@ -377,25 +323,26 @@ fn load_font() {
     }
 }
 
-/// Carrega `/sbin/init` como PID 1 e entra em ring 3.
 fn start_init() -> ! {
-    console_write("start_init: loading /sbin/init as PID 1\n");
+    crate::serial_write(b"start_init: loading /sbin/init as PID 1\r\n");
     let Some(init_program) = ramfs::read("/sbin/init") else {
-        kernel_panic("required /sbin/init not found in the active root filesystem\n");
+        crate::serial_write(b"start_init: /sbin/init not found; halting\r\n");
+        crate::halt();
     };
-    console_write("start_init: /sbin/init found; entering DEF loader\n");
+    crate::serial_write(b"start_init: /sbin/init found; entering DEF loader\r\n");
+    crate::serial_write(b"start_init: init bytes magic: ");
+    crate::serial_write(&init_program[..4.min(init_program.len())]);
+    crate::serial_write(b" len=");
+    crate::serial_write_hex(init_program.len() as u64);
+    crate::serial_write(b"\r\n");
     if process::init(&[(init_program, 1)]).is_err() {
-        console_write("start_init: DEF loader failed; stopping safely\n");
+        crate::serial_write(b"start_init: DEF loader failed; stopping safely\r\n");
         crate::halt();
     }
     subsystems::mark_ready(Subsystem::InitProcess);
     time::configure_timer_interrupt();
     subsystems::mark_ready(Subsystem::Timer);
-    console_write("Timer configured; preemptive priority scheduling active\n");
-    subsystems::report();
-    // Interrupts stay disabled here on purpose. `process::start` enters ring 3
-    // through an iretq whose saved RFLAGS has IF=1, so the timer can only fire
-    // once a valid user trap frame is on the stack.
+    crate::serial_write(b"Timer configured; preemptive priority scheduling active\r\n");
     process::start()
 }
 
@@ -413,7 +360,6 @@ pub(crate) fn console_write(text: &str) {
             .position(|byte| *byte == b'\n')
             .map_or(remaining.len(), |newline| newline + 1);
         let line = &remaining[..length];
-        // `append` já espelha os bytes na serial.
         kernel_log::append(line);
         framebuffer::write_utf8(line);
         if line.last() == Some(&b'\n') {
@@ -469,8 +415,7 @@ fn console_hex(mut value: u64) {
     write_to_console(&digits[cursor..]);
 }
 
-/// Escreve um u64 em hexadecimal na serial (sem newline).
-fn serial_write_hex(mut value: u64) {
+pub(crate) fn serial_write_hex(mut value: u64) {
     let mut digits = [0u8; 16];
     let mut cursor = digits.len();
     if value == 0 {
@@ -495,17 +440,11 @@ pub(crate) fn console_write_number(value: u64) {
     console_number(value);
 }
 
-/// Espelha dígitos ASCII (decimais/hex) no log, na serial e no framebuffer.
 fn write_to_console(digits: &[u8]) {
-    // `append` já espelha na serial.
     kernel_log::append(digits);
     framebuffer::write_utf8(digits);
 }
 
-/// Para a CPU para sempre com interrupções desabilitadas.
-///
-/// Público dentro da crate porque o escalonador e o boot o usam quando não há
-/// mais nada a executar.
 pub(crate) fn halt() -> ! {
     loop {
         unsafe {

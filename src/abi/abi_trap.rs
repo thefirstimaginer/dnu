@@ -1,4 +1,4 @@
-//! O frame de trap compartilhado entre o stub `int 0x80`, o escalonador e os
+//! O frame de trap compartilhado entre o stub `syscall`, o escalonador e os
 //! handlers de syscall.
 //!
 //! O layout é exatamente o dos `push` do stub em `arch/x86_64/idt.rs` seguido
