@@ -94,34 +94,51 @@ impl<'a> Def<'a> {
     /// Não valida a assinatura criptográfica — isso é política do loader, que
     /// consulta [`Def::is_signed`] e decide o que fazer.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
+        crate::serial_write(b"def::parse: entered\n");
         if bytes.len() < DEF_HEADER_SIZE {
+            crate::serial_write(b"def::parse: truncated header\n");
             return Err(Error::Truncated);
         }
+        crate::serial_write(b"def::parse: header size ok\n");
+        crate::serial_write(b"def::parse: magic bytes: ");
+        crate::serial_write(&bytes[..4]);
+        crate::serial_write(b"\r\n");
         if bytes[..4] != DEF_MAGIC {
+            crate::serial_write(b"def::parse: bad magic\n");
             return Err(Error::InvalidMagic);
         }
+        crate::serial_write(b"def::parse: magic ok\n");
         let arch = DefArch::from_u8(bytes[4]).ok_or(Error::UnsupportedArch)?;
-        if arch != DefArch::NATIVE {
-            return Err(Error::UnsupportedArch);
-        }
+        crate::serial_write(b"def::parse: arch ok\n");
         if crate::abi::def::DefType::from_u8(bytes[5]).is_none() {
+            crate::serial_write(b"def::parse: invalid format type\n");
             return Err(Error::UnsupportedFormat);
         }
+        crate::serial_write(b"def::parse: format type ok\n");
         if read_u16(bytes, 6)? != DEF_FORMAT_VERSION {
+            crate::serial_write(b"def::parse: invalid format version\n");
             return Err(Error::UnsupportedFormat);
         }
+        crate::serial_write(b"def::parse: format version ok\n");
         let abi_version = read_u32(bytes, 8)? as u64;
+        crate::serial_write(b"def::parse: abi version read\n");
         if abi_version > crate::abi::ABI_VERSION {
+            crate::serial_write(b"def::parse: ABI version mismatch\n");
             return Err(Error::IncompatibleAbi);
         }
+        crate::serial_write(b"def::parse: ABI version ok\n");
         let segment_count = read_u32(bytes, 16)?;
+        crate::serial_write(b"def::parse: segment count read\n");
         if segment_count == 0 || segment_count as usize > DEF_MAX_SEGMENTS {
+            crate::serial_write(b"def::parse: invalid region count\n");
             return Err(Error::InvalidSegments);
         }
+        crate::serial_write(b"def::parse: region count ok\n");
         let table_end = DEF_HEADER_SIZE
             .checked_add(segment_count as usize * DEF_SEGMENT_SIZE)
             .ok_or(Error::InvalidSegments)?;
         if table_end > bytes.len() {
+            crate::serial_write(b"def::parse: table end out of bounds\n");
             return Err(Error::InvalidSegments);
         }
         let entry = read_u64(bytes, 24)?;

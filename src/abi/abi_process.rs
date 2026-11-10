@@ -18,15 +18,24 @@ use crate::process;
 
 /// `exec`/`execve`: decodifica caminho, argumentos e ambiente.
 pub fn exec_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
+    crate::console_write_bytes(b"exec_handler: entered\r\n");
     let replace = frame.rax == crate::abi::SYS_EXECVE;
     let mut decoded = ExecArguments::new();
     if let Err(error) = decoded.load(frame) {
+        crate::console_write_bytes(b"exec_handler: failed to decode arguments\r\n");
         return frame.fail(error);
     }
+    crate::console_write_bytes(b"exec_handler: path=");
+    crate::console_write_bytes(decoded.path().as_bytes());
+    crate::console_write_bytes(b"\r\n");
     if replace {
-        process::execve_current(decoded.path(), &decoded.arguments(), &decoded.environment(), frame)
+        let result = process::execve_current(decoded.path(), &decoded.arguments(), &decoded.environment(), frame);
+        crate::console_write_bytes(b"exec_handler: execve returned\r\n");
+        result
     } else {
-        process::spawn_current(decoded.path(), &decoded.arguments(), &decoded.environment(), frame)
+        let result = process::spawn_current(decoded.path(), &decoded.arguments(), &decoded.environment(), frame);
+        crate::console_write_bytes(b"exec_handler: spawn returned\r\n");
+        result
     }
 }
 
@@ -36,6 +45,36 @@ pub fn exec_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
 /// porque os seis registradores já estão ocupados.
 pub fn spawn_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
     crate::console_write_bytes(b"spawn_handler CALLED!\r\n");
+    crate::console_write_bytes(b"spawn_handler: path_ptr=0x");
+    // caminho e tamanho são lidos abaixo
+    let path_ptr = frame.rdi;
+    let path_len = frame.rsi;
+    // Escreve o ponteiro e tamanho em hex simples (debug)
+    let mut ptr = path_ptr;
+    let mut hex_buf = [0u8; 16];
+    let mut h = 16;
+    while h > 0 {
+        h -= 1;
+        hex_buf[h] = b"0123456789abcdef"[(ptr & 0xf) as usize];
+        ptr >>= 4;
+    }
+    crate::console_write_bytes(&hex_buf[h..]);
+    crate::console_write_bytes(b" len=");
+    let mut len = path_len;
+    let mut len_buf = [0u8; 20];
+    let mut l = len_buf.len();
+    if len == 0 {
+        l -= 1;
+        len_buf[l] = b'0';
+    } else {
+        while len > 0 {
+            l -= 1;
+            len_buf[l] = b'0' + (len % 10) as u8;
+            len /= 10;
+        }
+    }
+    crate::console_write_bytes(&len_buf[l..]);
+    crate::console_write_bytes(b"\r\n");
     // O caminho nunca excede a ABI de exec, então um buffer de 128 bytes basta.
     let mut path_buffer = [0u8; MAX_EXEC_ITEM_SIZE];
     let path_length = frame.rsi;
@@ -46,6 +85,10 @@ pub fn spawn_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
         };
         if length == 0 || length > path_buffer.len() {
             return frame.fail(EINVAL);
+        }
+        // Copia o caminho da memória do usuário para o buffer do kernel.
+        if !process::copy_from_current_user(frame.rdi, &mut path_buffer[..length]) {
+            return frame.fail(EFAULT);
         }
         match core::str::from_utf8(&path_buffer[..length]) {
             Ok(path) => path,
