@@ -26,7 +26,14 @@ pub fn identity(frame: &mut TrapFrame) -> *mut TrapFrame {
 /// escalonador; juntar tudo aqui garante que os números sejam coerentes entre si
 /// (o userspace não pode medir uptime nem RAM por conta própria).
 pub fn system_info(frame: &mut TrapFrame) -> *mut TrapFrame {
-    let (memory_total, memory_free) = crate::memory::usage();
+    let allocator = unsafe {
+        let ptr_val = core::ptr::read(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR));
+        if ptr_val.is_null() {
+            return frame;
+        }
+        &*ptr_val
+    };
+    let (memory_total, memory_free) = crate::memory::usage(allocator);
     let (framebuffer_width, framebuffer_height) = crate::framebuffer::description()
         .map_or((0, 0), |description| {
             (description.width as u32, description.height as u32)

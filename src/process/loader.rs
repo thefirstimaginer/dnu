@@ -8,6 +8,7 @@ use core::mem::size_of;
 use core::ptr;
 
 use crate::abi::trap::TrapFrame;
+use crate::memory;
 use crate::fpu;
 use crate::gdt;
 use crate::paging::{AddressSpace, MapError, PageFlags};
@@ -212,27 +213,43 @@ pub fn load(
     location: FrameLocation,
     credentials: ProcessCredentials,
 ) -> Result<Process, LoadError> {
-    let image = Def::parse(image).map_err(LoadError::InvalidDef)?;
-    let address_space = AddressSpace::new_user().ok_or(LoadError::OutOfMemory)?;
+    let allocator = unsafe {
+        let ptr_val = core::ptr::read(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR));
+        if ptr_val.is_null() {
+            return Err(LoadError::OutOfMemory);
+        }
+        &mut *ptr_val
+    };
+    crate::serial_write(b"loader: load \"");
+    crate::serial_write(name.as_bytes());
+    crate::serial_write(b"\" pid=");
+    crate::serial_write_hex(pid as u64);
+    crate::serial_write(b"\r\n");
+    crate::serial_write(b"loader: parse DEF\n");
+    let image = Def::parse(image).map_err(|e| {
+        crate::serial_write(b"loader: parse DEF failed\n");
+        LoadError::InvalidDef(e)
+    })?;
+    crate::serial_write(b"loader: parse DEF ok\n");
+    crate::serial_write(b"loader: new_user space\n");
+    let address_space = AddressSpace::new_user(allocator).ok_or(LoadError::OutOfMemory)?;
+    crate::serial_write(b"loader: map_segments\n");
     map_segments(&image, &address_space)?;
-
+    crate::serial_write(b"loader: map_segments ok\n");
+    crate::serial_write(b"loader: stack_size\n");
     let stack_size = stack_size(&image);
-    // ASLR básico: deslocamento pseudo-aleatório da base da pilha baseado no TSC.
-    // Não é criptograficamente seguro, mas dificulta ataques de memória que
-    // dependem de endereços fixos.
+    crate::serial_write(b"loader: read_tsc\n");
     let tsc = crate::time::read_tsc();
+    crate::serial_write(b"loader: stack_top\n");
     let stack_rand = (tsc % (16 * PAGE_SIZE)) & !(PAGE_SIZE - 1);
     let stack_top = USER_STACK_TOP
         .checked_sub(stack_rand)
         .ok_or(LoadError::InvalidMapping)?;
+    crate::serial_write(b"loader: stack_start\n");
     let stack_start = stack_top
         .checked_sub(stack_size)
         .ok_or(LoadError::InvalidMapping)?;
-    // Página de guarda abaixo do fundo da pilha: a pilha cresce para baixo,
-    // então um estouro atinge uma página não mapeada e gera page fault em vez
-    // de corrigir silenciosamente mapeamentos adjacentes.
-    let guard_page = stack_start.checked_sub(PAGE_SIZE).ok_or(LoadError::InvalidMapping)?;
-    let _ = guard_page; // intencionalmente não mapeada: é a página de guarda
+    crate::serial_write(b"loader: map stack pages\n");
     let mut page = stack_start;
     while page < stack_top {
         address_space
@@ -240,50 +257,51 @@ pub fn load(
             .map_err(|_| LoadError::OutOfMemory)?;
         page += PAGE_SIZE;
     }
+    crate::serial_write(b"loader: find_tls_segment\n");
     let tls_segment = find_tls_segment(&image)?;
+    crate::serial_write(b"loader: prepare_user_stack\n");
     let (user_stack, user_argv, user_envp) =
         prepare_user_stack(&address_space, stack_top, arguments, environment)?;
-
-    // O bloco TLS fica **abaixo** do `rsp` inicial (que já aponta para a pilha
-    // de argumentos). Colocá-lo em `USER_STACK_TOP` sobreporia `argv`/`envp`.
-    // Layout final do topo da pilha:
-    //
-    //   USER_STACK_TOP ─► strings de argv/envp
-    //        rsp ─────► ponteiros de argv, envp, NULLs
-    //        ...  ─────► [ bloco TLS ][ TCB ]   (fs_base entre eles)
-    //
-    // O espaço é virtual e a pilha cresce para baixo, então desperdiçar
-    // `memsz + TCB_SIZE` de *gap* não custa RAM — só espaço de endereço.
+    crate::serial_write(b"loader: build_tls\n");
     let fs_base = match &tls_segment {
         Some(tls) => build_tls(&image, &address_space, tls, user_stack)?,
         None => 0,
     };
-
+    crate::serial_write(b"loader: translate entry\n");
     let entry = image.entry;
     if address_space.translate(entry).is_none() {
         return Err(LoadError::InvalidMapping);
     }
+    crate::serial_write(b"loader: setup frame\n");
 
     let frame = match location {
         FrameLocation::At(pointer) => pointer,
         FrameLocation::TopOfSlot(slot) => {
-            let stacks = unsafe { &mut *KERNEL_STACKS.0.get() };
+            let stacks_ptr = KERNEL_STACKS.0.get();
+            crate::serial_write(b"loader: stacks_ptr=0x");
+            crate::serial_write_hex(stacks_ptr as u64);
+            crate::serial_write(b"\r\n");
+            let stacks = unsafe { &mut *stacks_ptr };
             let top = stacks.0[slot].as_mut_ptr() as u64 + KERNEL_STACK_SIZE as u64;
             (top as usize - size_of::<TrapFrame>()) as *mut TrapFrame
         }
     };
+    crate::serial_write(b"loader: frame=0x");
+    crate::serial_write_hex(frame as u64);
+    crate::serial_write(b"\r\n");
+    crate::serial_write(b"loader: frame_write\n");
     unsafe {
         frame.write(initial_frame(entry, user_stack, user_argv, user_envp, arguments, environment));
     }
-
+    crate::serial_write(b"loader: frame_written\n");
+    crate::serial_write(b"loader: process_name\n");
     let mut process_name = [0; crate::abi::PROCESS_NAME_SIZE];
     let copied_name_length = name.len().min(process_name.len());
     process_name[..copied_name_length].copy_from_slice(&name.as_bytes()[..copied_name_length]);
-    let mut fpu_state = FpuState::EMPTY;
+    crate::serial_write(b"loader: fpu_state (EMPTY, skip fxsave)\n");
+    let fpu_state = FpuState::EMPTY;
     let _ = FpuState::_ALIGN_CHECK;
-    unsafe {
-        fpu::reset(fpu_state.as_mut_ptr());
-    }
+    crate::serial_write(b"loader: fpu_done\n");
     Ok(Process {
         pid,
         tgid: pid,
@@ -328,10 +346,23 @@ pub fn load(
 }
 
 fn map_segments(image: &Image<'_>, address_space: &AddressSpace) -> Result<(), LoadError> {
+    crate::serial_write(b"loader: map_segments: start\n");
     for index in 0..image.segment_count() {
         let Some(segment) = loaded_segment(image, index)? else {
+            crate::serial_write(b"loader: map_segments: segmento nao carregavel\r\n");
             continue;
         };
+        crate::serial_write(b"loader: map_segments: segmento vaddr=0x");
+        crate::serial_write_hex(segment.virtual_address);
+        crate::serial_write(b" memsz=0x");
+        crate::serial_write_hex(segment.memory_size);
+        crate::serial_write(b" filesz=0x");
+        crate::serial_write_hex(segment.file_size as u64);
+        crate::serial_write(b" off=0x");
+        crate::serial_write_hex(segment.file_offset as u64);
+        crate::serial_write(b" perms=0x");
+        crate::serial_write_hex(segment.permissions as u64);
+        crate::serial_write(b"\r\n");
         let segment_end = segment
             .virtual_address
             .checked_add(segment.memory_size)
@@ -355,7 +386,12 @@ fn map_segments(image: &Image<'_>, address_space: &AddressSpace) -> Result<(), L
         while page <= last_page {
             match address_space.map_user_page_with(page, flags) {
                 Ok(_) | Err(MapError::AlreadyMapped) => {}
-                Err(_) => return Err(LoadError::OutOfMemory),
+                Err(_) => {
+                    crate::serial_write(b"loader: map_segments: falha ao alocar frame em 0x");
+                    crate::serial_write(&page.to_le_bytes());
+                    crate::serial_write(b"\n");
+                    return Err(LoadError::OutOfMemory);
+                }
             }
             page += PAGE_SIZE;
         }
@@ -364,7 +400,9 @@ fn map_segments(image: &Image<'_>, address_space: &AddressSpace) -> Result<(), L
             .file_bytes(segment_file(&segment))
             .ok_or(LoadError::InvalidMapping)?;
         copy_to_space_result(address_space, segment.virtual_address, file_bytes)?;
+        crate::serial_write(b"loader: map_segments: segmento mapeado ok\r\n");
     }
+    crate::serial_write(b"loader: map_segments: todos os segmentos mapeados\r\n");
     Ok(())
 }
 

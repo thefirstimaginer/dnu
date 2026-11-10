@@ -152,7 +152,15 @@ pub fn create(info: &mut SurfaceInfo) -> Result<(), i64> {
         let _ = crate::kernel_log::append(b"surface: no free slots\n");
         return Err(ENOSPC);
     };
-    let Some(frame) = crate::memory::allocate_frame() else {
+    let allocator = unsafe {
+        let ptr_val = core::ptr::read(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR));
+        if ptr_val.is_null() {
+            let _ = crate::kernel_log::append(b"surface: allocator not ready\n");
+            return Err(ENOSPC);
+        }
+        &mut *ptr_val
+    };
+    let Some(frame) = crate::memory::allocate_frame(allocator) else {
         let _ = crate::kernel_log::append(b"surface: no frames\n");
         return Err(ENOSPC);
     };
