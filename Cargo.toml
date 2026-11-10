@@ -7,9 +7,8 @@
 #   make dzImage      # o único artefato publicado (kernel + initramfs)
 #   make test         # suíte do kernel no host
 #
-# A ABI usada pelo kernel e pelo carregador de DEF é o crate
-# `imagineos_abi`, cuja definição canônica está em imagine-base/abi/.
-# O DNU consome o dzImage gerado por este repositório.
+# A ABI canônica do kernel vive em `dnu/abi/` (crate `dnu-abi`). O DNU consome
+# o dzImage gerado por este repositório.
 
 [package]
 name = "imagineos-dnu-kernel"
@@ -17,9 +16,8 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-# `imagine-base/abi` é workspace próprio: o kernel aplica `panic = "abort"`,
-# mas ferramentas de host e testes linkam a ABI com unwinding.
-exclude = ["../imagine-base/abi"]
+# `dnu-abi` é o contrato de ABI do kernel (em `dnu/abi/`). Ferramentas de host
+# e testes podem linkar com unwinding; o kernel aplica `panic = "abort"`.
 resolver = "2"
 
 [features]
@@ -31,6 +29,7 @@ direct-boot = []
 
 [dependencies]
 limine = "0.5.0"
+dnu-abi = { path = "abi" }
 
 [profile.dev]
 panic = "abort"

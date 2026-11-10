@@ -1,7 +1,7 @@
 //! Implementação do contrato de syscalls no lado do kernel.
 //!
 //! O ponto de entrada é `dispatch::dreamcore_syscall_dispatch` (chamado pelo
-//! stub `int 0x80` em `arch/x86_64/idt.rs`), que decodifica os registradores do
+//! stub `syscall` em `arch/x86_64/idt.rs`), que decodifica os registradores do
 //! `trap::TrapFrame` e roteia para um dos módulos:
 //!
 //! * `fs` — arquivos, diretórios, descritores (`open/read/write/lseek/fstat`);
@@ -13,7 +13,7 @@
 //! * `input` — leitura de teclado/serial para o console do kernel;
 //! * `user` — cópia validada de/para o espaço de usuário.
 //!
-//! Os números das syscalls e os tamanhos limites vêm de `imagineos_abi`, o
+//! Os números das syscalls e os tamanhos limites vêm de `dnu-abi`, o
 //! mesmo crate que a libc e o runtime de usuário usam, para que kernel e
 //! userspace não possam divergir.
 

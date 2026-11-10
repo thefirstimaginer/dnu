@@ -52,9 +52,9 @@ DNU_PACK_BIN  := $(BUILD_DIR)/tools/dnu_pack
 # Fonte PSF embarcada no kernel.
 FONT := $(ROOT)/src/assets/zap-vga16.psf
 
-# Versão da ABI, lida da definição canônica em src/abi/lib.rs.
+# Versão da ABI, lida da definição canônica em dnu/abi/src/types.rs.
 ABI_VERSION := $(shell sed -n 's/^pub const ABI_VERSION: u64 = \([0-9][0-9]*\).*/\1/p' \
-                    $(ROOT)/src/abi/lib.rs)
+                    $(ROOT)/abi/src/types.rs)
 
 # Cada arquivo de tests/ é um harness `rustc --test` no host.
 KERNEL_TESTS := $(patsubst $(ROOT)/tests/%.rs,%,$(wildcard $(ROOT)/tests/*.rs))
@@ -152,7 +152,7 @@ $(RAMFS_TAR): $(DZIMAGE_BIN)
 	mkdir -p $(BUILD_DIR)/ramfs_stage/etc $(BUILD_DIR)/ramfs_stage/home \
 		$(BUILD_DIR)/ramfs_stage/tmp $(BUILD_DIR)/ramfs_stage/usr
 	tar --format=ustar --numeric-owner --owner=0 --group=0 \
-		-C $(BUILD_DIR)/ramfs_stage -cf $@ $$(cd $(BUILD_DIR)/ramfs_stage && find . -mindepth 1 -maxdepth 1 -printf '%P\n')
+		-C $(BUILD_DIR)/ramfs_stage -cf $@ $$(cd $(BUILD_DIR)/ramfs_stage && find . -mindepth 1 -printf '%P\n')
 
 # Passo provisório: dzImage só com o kernel (payload do instalador).
 .PHONY: provisional
@@ -170,7 +170,7 @@ provisional: $(DZIMAGE_BIN) $(KERNEL)
 # como arquivo separado (initrd) pelo orquestrador de build do ImagineOS
 # (imagine-tools/build/kernel.py), não aqui. O initramfs.tar só é montado
 # quando RAMFS_DIR é informado explicitamente e não vazio.
-$(DZ_IMAGE): $(DZIMAGE_BIN) FORCE
+$(DZ_IMAGE): $(DZIMAGE_BIN) FORCE $(if $(RAMFS_DIR),$(RAMFS_TAR))
 	@touch $(ROOT)/src/main.rs
 	@$(MAKE) --no-print-directory kernel
 	@if [ -n "$(RAMFS_DIR)" ]; then \
