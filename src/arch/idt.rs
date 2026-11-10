@@ -135,6 +135,10 @@ dreamcore_syscall_stub:
 
 .global dreamcore_timer_interrupt
 dreamcore_timer_interrupt:
+    // Salva o RSP original antes de qualquer push: necessário para retornar
+    // corretamente para ring 0 quando o timer ocorre durante uma syscall
+    // (o hardware não empilha SS/RSP sem change de ring).
+    mov r10, rsp
     push rax
     push rbx
     push rcx
@@ -169,7 +173,60 @@ dreamcore_timer_interrupt:
     pop rcx
     pop rbx
     pop rax
+    // rsp agora aponta para o campo rip do TrapFrame (offset 120).
+    // cs está em rsp+128 (offset 128 do TrapFrame). Verifica se veio de
+    // userspace (CS & 3 == 3).
+    mov ax, [rsp + 128]           // carrega cs do frame
+    and ax, 3                     // cs & 3 == 3? (userspace?)
+    jz .timer_iret_kernel
+    jmp .timer_iret_userspace
+.timer_iret_kernel:
+    // Veio de ring 0: o hardware não empilhou SS/RSP. Restaura RSP original
+    // (salvo em r10) e SS kernel para o iretq retornar corretamente para ring 0.
+    mov rax, r10
+    mov [rsp + 144], rax           // RSP = kernel stack no momento da interrupção
+    mov ax, 0x10
+    mov [rsp + 152], ax            // SS = KERNEL_DATA_SELECTOR
+    mov ax, 0x08
+    mov [rsp + 128], ax            // CS = KERNEL_CODE_SELECTOR
+    mov eax, 0x202
+    mov [rsp + 136], eax           // RFLAGS = IF=1
+    jmp .timer_iret_done
+.timer_iret_userspace:
+    // Garante que CS/SS/RFLAGS são válidos para ring 3 antes do iretq.
+    // CS = USER_CODE_SELECTOR (0x2b), SS = USER_DATA_SELECTOR (0x33).
+    mov ax, 0x2b
+    mov [rsp + 128], ax            // CS = usuário
+    mov ax, 0x33
+    mov [rsp + 152], ax            // SS = usuário
+    mov eax, 0x202
+    mov [rsp + 136], eax           // RFLAGS = IF=1
+    jmp .timer_iret_done
+.timer_iret_done:
+    // rsp aponta para o início do TrapFrame (campo r15). O iretq espera que
+    // rsp aponte para o campo rip (offset 120), seguido de cs, rflags, rsp, ss.
+    lea rsp, [rsp + 120]
     iretq
+
+.print_hex16:
+    // Imprime AX em hex na UART (4 dígitos).
+    push rcx
+    mov rcx, 12
+.print_hex_loop:
+    rol ax, 4
+    mov rbx, rax
+    and ebx, 0xF
+    cmp ebx, 9
+    jbe .print_hex_digit
+    add ebx, 7  // 'A' - 10
+.print_hex_digit:
+    add ebx, 0x30  // '0'
+    mov dx, 0x3f8
+    mov al, bl
+    out dx, al
+    loop .print_hex_loop
+    pop rcx
+    ret
 
 .global dreamcore_resume_trap_frame
 dreamcore_resume_trap_frame:
@@ -236,7 +293,27 @@ unsafe extern "C" {
 /// the frame to resume on top of the iretq instruction.
 #[unsafe(no_mangle)]
 extern "C" fn dreamcore_timer_dispatch(frame: *mut crate::abi::trap::TrapFrame) -> *mut crate::abi::trap::TrapFrame {
-    crate::arch_hub::x86_64::timer::handle_interrupt(frame)
+    let next = crate::arch_hub::x86_64::timer::handle_interrupt(frame);
+    // Garante que os seletores de segmento e flags são válidos para ring 3
+    // antes do iretq. Se o retorno é para userspace (cs&3==3), corrige CS/SS/
+    // RFLAGS caso o scheduler tenha deixado valores inconsistentes.
+    if !next.is_null() && unsafe { (*next).cs & 3 == 3 } {
+        unsafe {
+            (*next).cs = crate::gdt::USER_CODE_SELECTOR;
+            (*next).ss = crate::gdt::USER_DATA_SELECTOR;
+            (*next).rflags = 0x202; // IF=1, bit 1 (reservado) sempre 1
+        }
+        crate::serial_write(b"timer_iret: cs=0x");
+        crate::serial_write_hex(crate::gdt::USER_CODE_SELECTOR);
+        crate::serial_write(b" ss=0x");
+        crate::serial_write_hex(crate::gdt::USER_DATA_SELECTOR);
+        crate::serial_write(b" rflags=0x202 rip=0x");
+        crate::serial_write_hex(unsafe { (*next).rip });
+        crate::serial_write(b" rsp=0x");
+        crate::serial_write_hex(unsafe { (*next).rsp });
+        crate::serial_write(b"\r\n");
+    }
+    next
 }
 
 
@@ -299,6 +376,16 @@ extern "C" fn dreamcore_exception_handler(
         serial_write(if error & 8 != 0 { b"1" } else { b"0" });
         serial_write(b",I=");
         serial_write(if error & 16 != 0 { b"1" } else { b"0" });
+        serial_write(b"]");
+    }
+    if vector == 13 {
+        // Decode general protection fault error code:
+        //   bit 0: 0=segment register, 1=IDT/descriptor table
+        //   bits 1-15: segment selector index (if bit 0 = 0)
+        serial_write(b" [GP:ext=");
+        serial_write(if error & 1 != 0 { b"1" } else { b"0" });
+        serial_write(b",sel=");
+        crate::serial_write_hex((error >> 1) & 0x1fff);
         serial_write(b"]");
     }
     serial_write(b" rip=0x");
