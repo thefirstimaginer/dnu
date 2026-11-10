@@ -21,6 +21,15 @@ use crate::abi::def::DefPermissions;
 
 use super::space::copy_to_space_result;
 
+/// Buffer estático alinhado a 16 bytes usado para inicializar o estado FPU
+/// via `fpu::reset`. O `fxsave` exige alinhamento de 16 bytes; variáveis
+/// locais na pilha não garantem esse alinhamento, então usamos um buffer
+/// estático e copiamos o resultado para o campo do processo.
+#[repr(align(16))]
+struct FpuAlign16([u8; fpu::FXSAVE_SIZE]);
+
+static mut FPU_RESET_SCRATCH: FpuAlign16 = FpuAlign16([0; fpu::FXSAVE_SIZE]);
+
 /// Falhas possíveis ao montar um processo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadError {
@@ -298,11 +307,7 @@ pub fn load(
     let mut process_name = [0; crate::abi::PROCESS_NAME_SIZE];
     let copied_name_length = name.len().min(process_name.len());
     process_name[..copied_name_length].copy_from_slice(&name.as_bytes()[..copied_name_length]);
-    crate::serial_write(b"loader: fpu_state (EMPTY, skip fxsave)\n");
-    let fpu_state = FpuState::EMPTY;
-    let _ = FpuState::_ALIGN_CHECK;
-    crate::serial_write(b"loader: fpu_done\n");
-    Ok(Process {
+    let mut process = Process {
         pid,
         tgid: pid,
         active: true,
@@ -317,6 +322,10 @@ pub fn load(
         priority: Priority::Supervisor,
         slice_used: 0,
         kernel_ticks: 0,
+        // O estado FPU começa como EMPTY e é inicializado com `fpu::reset`
+        // abaixo, para produzir um estado válido para o `fxrstor` do
+        // primeiro `schedule`. `FpuState::EMPTY` (todos zeros) não é aceito
+        // pelo hardware diretamente.
         allows_disk_install,
         uid: credentials.uid,
         gid: credentials.gid,
@@ -331,7 +340,7 @@ pub fn load(
         signal_actions: [crate::abi::SIGNAL_DEFAULT; 32],
         signal_restorer: 0,
         signal_frame: None,
-        fpu_state,
+        fpu_state: FpuState::EMPTY,
         tls_size: tls_segment.as_ref().map_or(0, |tls| tls.memory_size),
         tls_alignment: tls_segment.as_ref().map_or(16, |tls| tls.alignment),
         // Bloco TLS montado acima (0 quando o DEF não tem `PT_TLS`).
@@ -342,7 +351,22 @@ pub fn load(
         wake_deadline: 0,
         mappings: [crate::process::Mapping::EMPTY; crate::process::MAX_MAPPINGS],
         mapping_count: 0,
-    })
+    };
+    // Inicializa o estado FPU com `fninit` + `fxsave` num buffer alinhado a
+    // 16 bytes, e depois copia para o campo do processo. O `fxsave` exige
+    // alinhamento de 16 bytes, que variáveis locais na pilha não garantem.
+    let scratch_ptr = core::ptr::addr_of_mut!(FPU_RESET_SCRATCH);
+    unsafe {
+        let scratch = &mut *scratch_ptr;
+        fpu::reset(scratch.0.as_mut_ptr());
+        ptr::copy_nonoverlapping(
+            scratch.0.as_ptr(),
+            process.fpu_state.as_mut_ptr(),
+            fpu::FXSAVE_SIZE,
+        );
+    }
+    crate::serial_write(b"loader: fpu_state ready\n");
+    Ok(process)
 }
 
 fn map_segments(image: &Image<'_>, address_space: &AddressSpace) -> Result<(), LoadError> {
@@ -511,13 +535,13 @@ fn initial_frame(
         r14: 0,
         r13: 0,
         r12: 0,
-        r11: 0,
+        r11: 0x202, // RFLAGS: sysretq restaura RFLAGS de R11 ao voltar para ring 3.
         r10: 0,
         r9: 0,
         r8: 0,
         rbp: 0,
         rdx: environment.len() as u64,
-        rcx: user_envp,
+        rcx: entry, // RIP: sysretq restaura o RIP de userspace de RCX.
         rbx: 0,
         rax: 0,
         rip: entry,

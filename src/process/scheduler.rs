@@ -148,6 +148,7 @@ impl Priority {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Process {
     pub(crate) pid: usize,
