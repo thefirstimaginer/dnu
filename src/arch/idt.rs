@@ -131,6 +131,28 @@ dreamcore_syscall_stub:
     pop rcx
     pop rbx
     pop rax
+    // Diagnóstico: imprime RCX antes do sysretq para verificar RIP de destino.
+    mov al, 'R'
+    mov dx, 0x3f8
+    out dx, al
+    // Imprime RCX em hex (8 dígitos)
+    mov rdx, rcx
+    mov rcx, 32
+.print_rcx_loop:
+    rol rdx, 4
+    mov rax, rdx
+    and rax, 0xF
+    add rax, 0x30
+    cmp rax, 0x39
+    jbe .print_rcx_digit
+    add rax, 7
+.print_rcx_digit:
+    mov dx, 0x3f8
+    out dx, al
+    loop .print_rcx_loop
+    mov al, 10
+    mov dx, 0x3f8
+    out dx, al
     sysretq
 
 .global dreamcore_timer_interrupt

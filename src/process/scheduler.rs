@@ -397,6 +397,7 @@ fn load(
 
 
 pub fn start() -> ! {
+    crate::serial_write(b"process: start: function entered\r\n");
     crate::serial_write(b"process: start: entering ring 3\n");
     let scheduler = unsafe { &mut *SCHEDULER.0.get() };
     let process = scheduler.processes[0];
@@ -1481,7 +1482,12 @@ pub fn spawn_current_with_io(
     unsafe {
         (*frame).rax = pid as u64;
     }
-    schedule(frame, false)
+    // Não chamamos `schedule` aqui: o pai (init) deve continuar executando
+    // após o spawn. O filho recém-criado será escalonado quando o pai ceder a
+    // CPU (via `waitpid`/`yield`) ou pelo timer. Chamar `schedule` agora
+    // faria o `sysretq` retornar para o filho em vez do pai, o que deixaria
+    // o pai "preso" no syscall e nunca continuaria a execução após o spawn.
+    frame
 }
 
 /// `fork(2)`: cria um processo que é uma cópia do atual.

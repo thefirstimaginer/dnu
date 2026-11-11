@@ -16,6 +16,11 @@ use super::trap::{TrapFrame, E2BIG, EFAULT, EINVAL};
 use super::user::{copy_struct_from_user, load_user_vector, vector_slices, Vector};
 use crate::process;
 
+/// Escreve diagnóstico na UART.
+fn diag(s: &[u8]) {
+    crate::console_write_bytes(s);
+}
+
 /// `exec`/`execve`: decodifica caminho, argumentos e ambiente.
 pub fn exec_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
     crate::console_write_bytes(b"exec_handler: entered\r\n");
@@ -46,6 +51,8 @@ pub fn exec_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
 pub fn spawn_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
     crate::console_write_bytes(b"spawn_handler CALLED!\r\n");
     crate::console_write_bytes(b"spawn_handler: path_ptr=0x");
+    // caminho e tamanho são lidos abaixo
+    let path_ptr = frame.rdi;
     // caminho e tamanho são lidos abaixo
     let path_ptr = frame.rdi;
     let path_len = frame.rsi;
@@ -128,13 +135,23 @@ pub fn spawn_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
         return frame.fail(error);
     }
 
-    process::spawn_current_with_io(
+    crate::console_write_bytes(b"spawn_handler: calling spawn_current_with_io\r\n");
+    let result = process::spawn_current_with_io(
         path,
         &vector_slices(&arguments, &argument_lengths, argument_count),
         &vector_slices(&environment, &environment_lengths, environment_count),
         &io,
         frame,
-    )
+    );
+    crate::console_write_bytes(b"spawn_handler: spawn_current_with_io returned, rcx=0x");
+    let mut rcx_val = unsafe { (*result).rcx };
+    let mut buf = [0u8; 16];
+    let mut i = 0;
+    if rcx_val == 0 { buf[i] = b'0'; i += 1; }
+    while rcx_val > 0 { buf[i] = b'0' + (rcx_val % 16) as u8; if buf[i] > b'9' { buf[i] += 7; } i += 1; rcx_val /= 16; }
+    while i > 0 { i -= 1; crate::console_write_bytes(&buf[i..i+1]); }
+    crate::console_write_bytes(b"\r\n");
+    result
 }
 
 /// `pipe(int fds[2])`: devolve `[leitura, escrita]` no array do usuário.

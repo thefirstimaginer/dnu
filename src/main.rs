@@ -343,6 +343,7 @@ fn start_init() -> ! {
     time::configure_timer_interrupt();
     subsystems::mark_ready(Subsystem::Timer);
     crate::serial_write(b"Timer configured; preemptive priority scheduling active\r\n");
+    crate::serial_write(b"about to call process::start\r\n");
     process::start()
 }
 
