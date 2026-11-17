@@ -278,6 +278,9 @@ pub fn load(
     };
     crate::serial_write(b"loader: translate entry\n");
     let entry = image.entry;
+    crate::serial_write(b"loader: entry=0x");
+    crate::serial_write_hex(entry);
+    crate::serial_write(b"\n");
     if address_space.translate(entry).is_none() {
         return Err(LoadError::InvalidMapping);
     }
@@ -631,7 +634,7 @@ fn prepare_user_stack(
         stack_pointer + (arguments.len() * size_of::<u64>()) as u64,
         &0u64.to_le_bytes(),
     )?;
-    let entry_stack = stack_pointer.checked_sub(8).ok_or(LoadError::InvalidMapping)?;
+    let entry_stack = stack_pointer; // já está alinhado a 16 bytes (linha acima: & !0xf)
     Ok((entry_stack, stack_pointer, environment_vector))
 }
 

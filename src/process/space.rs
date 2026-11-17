@@ -54,6 +54,9 @@ pub fn copy_from_space(space: &AddressSpace, address: u64, output: &mut [u8]) ->
             return false;
         };
         let Some(source) = space.translate(current) else {
+            crate::serial_write(b"copy_from_space: translate failed at 0x");
+            crate::serial_write_hex(current);
+            crate::serial_write(b"\r\n");
             return false;
         };
         let available =

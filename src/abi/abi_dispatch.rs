@@ -27,6 +27,7 @@ use super::trap::{TrapFrame, ENOSYS};
 use crate::abi::{display, fs, system};
 use crate::drivers::ata;
 use crate::process;
+use crate::process::SCHEDULER;
 
 // Entrada chamada pelo stub `syscall`.
 #[unsafe(no_mangle)]
@@ -35,15 +36,90 @@ extern "C" fn dreamcore_syscall_dispatch(frame: *mut TrapFrame) -> *mut TrapFram
     crate::console::serial::write(b"SD:enter\n");
     crate::console_write_bytes(b"syscall_dispatch: rax=");
     let rax = unsafe { (*frame).rax };
-    let rax_bytes = rax.to_le_bytes();
-    crate::console_write_bytes(&rax_bytes[..]);
+    crate::serial_write_hex(rax);
+    crate::console_write_bytes(b" pid=");
+    crate::serial_write_hex(crate::process::current_pid() as u64);
+    crate::console_write_bytes(b" rdi=");
+    crate::serial_write_hex(unsafe { (*frame).rdi });
+    crate::console_write_bytes(b" rsi=");
+    crate::serial_write_hex(unsafe { (*frame).rsi });
+    crate::console_write_bytes(b" rdx=");
+    crate::serial_write_hex(unsafe { (*frame).rdx });
+    crate::console_write_bytes(b" rcx=");
+    crate::serial_write_hex(unsafe { (*frame).rcx });
+    crate::console_write_bytes(b" r9=");
+    crate::serial_write_hex(unsafe { (*frame).r9 });
     crate::console_write_bytes(b"\r\n");
+    // Evita preempção pelo timer durante a syscall: zera os ticks de kernel
+    // para que o timer não troque de processo enquanto estamos tratando a
+    // syscall. Isso garante que o sysretq retorne para o processo original.
+    unsafe {
+        let scheduler = &mut *SCHEDULER.0.get();
+        scheduler.processes[scheduler.current].kernel_ticks = 0;
+    }
     // Preserva os registradores FPU/SSE do processo que fez a syscall: o kernel
     // Rust pode usar XMM entre aqui e o retorno para o espaço de usuário.
     process::save_current_fpu();
     let next = dispatch(frame);
+    crate::serial_write(b"dispatch returned\r\n");
+    crate::serial_write(b"before deliver_pending_signal\r\n");
     let next = process::deliver_pending_signal(next);
-    process::restore_fpu_for(next);
+    crate::serial_write(b"signal delivered\r\n");
+    // Diagnóstico: imprime CS antes do iretq.
+    if !next.is_null() {
+        crate::serial_write(b"pre-iretq: cs=0x");
+        crate::serial_write_hex(unsafe { (*next).cs });
+        crate::serial_write(b" rip=0x");
+        crate::serial_write_hex(unsafe { (*next).rip });
+        crate::serial_write(b" ss=0x");
+        crate::serial_write_hex(unsafe { (*next).ss });
+        crate::serial_write(b"\r\n");
+    } else {
+        crate::serial_write(b"pre-iretq: next is NULL\r\n");
+    }
+    // Garante seletores de segmento válidos para ring 3 antes do iretq.
+    // RIP = RCX (endereço após o syscall, salvo pelo hardware) APENAS quando
+    // não há contexto switch. Em contexto switch, o RIP do próximo frame já
+    // está correto (definido pelo loader ou pelo contexto salvo anteriormente)
+    // e não deve ser sobrescrito por rcx (que contém o endereço do processo
+    // que chamou a syscall, não o próximo).
+    if !next.is_null() {
+        unsafe {
+            let same_process = next as *mut _ == frame as *mut _;
+            if same_process {
+                (*next).rip = (*next).rcx;
+            }
+            (*next).cs = crate::gdt::USER_CODE_SELECTOR;
+            (*next).ss = crate::gdt::USER_DATA_SELECTOR;
+            (*next).rflags = 0x202;
+            // Diagnóstico: valores finais antes de retornar para o assembly
+            crate::serial_write(b"fixup: rip=0x");
+            crate::serial_write_hex(unsafe { (*next).rip });
+            crate::serial_write(b" cs=0x");
+            crate::serial_write_hex(unsafe { (*next).cs });
+            crate::serial_write(b" rflags=0x");
+            crate::serial_write_hex(unsafe { (*next).rflags });
+            crate::serial_write(b" rsp=0x");
+            crate::serial_write_hex(unsafe { (*next).rsp });
+            crate::serial_write(b" ss=0x");
+            crate::serial_write_hex(unsafe { (*next).ss });
+            crate::serial_write(b"\r\n");
+            // Valida RSP: deve apontar para a stack de usuário (acima de 0x400000,
+            // abaixo do USER_STACK_TOP e alinhada a 16 bytes). Se inválido, o
+            // iretq causaria page fault ou GP fault no retorno para ring 3.
+            let rsp = (*next).rsp;
+            if rsp < crate::process::USER_STACK_TOP.checked_sub(crate::process::USER_STACK_SIZE).unwrap_or(0)
+                || rsp >= crate::process::USER_STACK_TOP
+                || rsp & 0xf != 0
+            {
+                crate::serial_write(b"syscall_dispatch: INVALID RSP=0x");
+                crate::serial_write_hex(rsp);
+                crate::serial_write(b" - forcing halt\r\n");
+                (*next).rsp = crate::process::USER_STACK_TOP;
+                (*next).rsp &= !(crate::process::PAGE_SIZE - 1);
+            }
+        }
+    }
     next
 }
 

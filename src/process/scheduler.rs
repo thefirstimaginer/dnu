@@ -25,6 +25,12 @@ use crate::process::descriptors;
 use crate::process::loader::{self, FrameLocation, LoadError};
 use crate::process::space;
 
+unsafe extern "C" {
+    fn dreamcore_save_next_frame(frame: *mut TrapFrame);
+    fn dreamcore_restore_next_frame(frame: *mut TrapFrame);
+    fn dreamcore_get_next_cr3() -> u64;
+}
+
 pub(crate) const MAX_PROCESSES: usize = crate::abi::MAX_PROCESSES;
 
 /// Faixas anônimas simultâneas por processo (`mmap`).
@@ -413,6 +419,11 @@ pub fn start() -> ! {
     gdt::set_kernel_stack(kernel_stack_top);
     crate::serial_write(b"process: start: switching to user address space\n");
     paging::switch(address_space);
+    // Diagnóstico: verifica se o frame ainda está acessível após o switch de CR3.
+    let rip_after = unsafe { (*process.frame).rip };
+    crate::serial_write(b"process: start: after switch, rip=0x");
+    crate::serial_write_hex(rip_after);
+    crate::serial_write(b"\r\n");
     crate::serial_write(b"process: start: address space switched, executing iretq\n");
     crate::serial_write(b"process: start: RIP=0x");
     crate::serial_write_hex(unsafe { (*process.frame).rip });
@@ -541,10 +552,17 @@ pub fn restore_fpu_for(frame: *mut TrapFrame) {
     }
     let scheduler = unsafe { &mut *SCHEDULER.0.get() };
     let slot = scheduler.current;
+    crate::serial_write(b"restore_fpu: slot=");
+    crate::serial_write_hex(slot as u64);
+    crate::serial_write(b" frame_match=");
+    crate::serial_write(if scheduler.processes[slot].frame == frame { b"1" } else { b"0" });
+    crate::serial_write(b"\r\n");
     if scheduler.processes[slot].frame == frame {
+        crate::serial_write(b"restore_fpu: calling fpu::restore\r\n");
         unsafe {
             fpu::restore(scheduler.processes[slot].fpu_state.as_ptr());
         }
+        crate::serial_write(b"restore_fpu: fpu::restore done\r\n");
         write_fs_base(scheduler.processes[slot].fs_base);
     }
 }
@@ -691,6 +709,21 @@ fn select_candidate(scheduler: &Scheduler) -> Option<usize> {
         let index = (current + distance) % MAX_PROCESSES;
         let process = &scheduler.processes[index];
         if !is_runnable(process) {
+            crate::serial_write(b"select_candidate: slot=");
+            crate::serial_write_hex(index as u64);
+            crate::serial_write(b" pid=");
+            crate::serial_write_hex(process.pid as u64);
+            crate::serial_write(b" active=");
+            crate::serial_write(if process.active { b"1" } else { b"0" });
+            crate::serial_write(b" stopped=");
+            crate::serial_write(if process.stopped { b"1" } else { b"0" });
+            crate::serial_write(b" zombie=");
+            crate::serial_write(if process.zombie { b"1" } else { b"0" });
+            crate::serial_write(b" waiting_for=");
+            crate::serial_write_hex(process.waiting_for as u64);
+            crate::serial_write(b" futex_address=");
+            crate::serial_write_hex(process.futex_address);
+            crate::serial_write(b"\r\n");
             continue;
         }
         // Desempate por round-robin: a varredura começa em `current + 1`, então
@@ -1127,6 +1160,7 @@ fn sleep_current_until_deadline(frame: *mut TrapFrame) -> *mut TrapFrame {
 /// escolhido (nenhum outro estava elegível). Nesse caso quem chamou continua
 /// rodando e pode reavaliar a condição que o levou a ceder.
 fn schedule_ex(frame: *mut TrapFrame, exiting: bool) -> (*mut TrapFrame, bool) {
+    crate::serial_write(b"schedule_ex: called\r\n");
     let before = unsafe { (*SCHEDULER.0.get()).current };
     let next = schedule(frame, exiting);
     let after = unsafe { (*SCHEDULER.0.get()).current };
@@ -1134,6 +1168,11 @@ fn schedule_ex(frame: *mut TrapFrame, exiting: bool) -> (*mut TrapFrame, bool) {
 }
 
 fn schedule(frame: *mut TrapFrame, exiting: bool) -> *mut TrapFrame {
+    crate::serial_write(b"schedule: called pid=");
+    crate::serial_write_hex(crate::process::current_pid() as u64);
+    crate::serial_write(b" exiting=");
+    crate::serial_write(if exiting { b"1" } else { b"0" });
+    crate::serial_write(b"\r\n");
     let scheduler = unsafe { &mut *SCHEDULER.0.get() };
     let current = scheduler.current;
     scheduler.processes[current].frame = frame;
@@ -1210,16 +1249,36 @@ fn schedule(frame: *mut TrapFrame, exiting: bool) -> *mut TrapFrame {
         return sleep_current_until_deadline(frame);
     }
     if let Some(candidate) = select_candidate(scheduler) {
+        crate::serial_write(b"schedule: switching to pid=");
+        crate::serial_write_hex(scheduler.processes[candidate].pid as u64);
+        crate::serial_write(b" slot=");
+        crate::serial_write_hex(candidate as u64);
+        crate::serial_write(b"\r\n");
         scheduler.current = candidate;
         // Fatia nova: o processo escolhido começa com o contador de ticks zerado.
         scheduler.processes[candidate].slice_used = 0;
         let next = scheduler.processes[candidate];
+        unsafe {
+            crate::serial_write(b"schedule: next.frame.rip=0x");
+            crate::serial_write_hex((*next.frame).rip);
+            crate::serial_write(b"\r\n");
+        }
         let address_space = next.address_space.expect("process address space");
         let kernel_stack_top = unsafe {
             (*KERNEL_STACKS.0.get()).0[candidate].as_ptr() as u64 + KERNEL_STACK_SIZE as u64
         };
         gdt::set_kernel_stack(kernel_stack_top);
-        paging::switch(address_space);
+        // Salva RIP/CS/RFLAGS/RSP/SS do próximo frame em variáveis estáticas
+        // e define NEXT_CR3 para o assembly fazer o paging::switch depois de
+        // salvar os valores (com CR3 ainda no kernel, todo acesso à memória é
+        // válido).
+        unsafe {
+            dreamcore_save_next_frame(next.frame);
+            crate::idt::NEXT_CR3_PUB = address_space.root_physical;
+            crate::idt::NEXT_CR3_VALID_PUB = true;
+        }
+        // NÃO chamar paging::switch() aqui: o assembly faz o mov cr3 após
+        // salvar os valores do frame e antes do iretq.
         // Restaura o estado FPU/SSE do processo que vai entrar na CPU.
         unsafe {
             fpu::restore(scheduler.processes[candidate].fpu_state.as_ptr());
@@ -1387,6 +1446,7 @@ pub fn spawn_current_with_io(
     io: &crate::abi::SpawnIo,
     frame: *mut TrapFrame,
 ) -> *mut TrapFrame {
+    crate::serial_write(b"spawn_current_with_io: called\r\n");
     if !has_access(path, 1) {
         unsafe {
             (*frame).rax = (-13i64) as u64;
@@ -1441,6 +1501,11 @@ pub fn spawn_current_with_io(
         let scheduler = unsafe { &*SCHEDULER.0.get() };
         scheduler.processes[parent_slot].pid
     };
+    crate::serial_write(b"spawn: parent_slot=");
+    crate::serial_write_hex(parent_slot as u64);
+    crate::serial_write(b" parent_pid=");
+    crate::serial_write_hex(parent_pid as u64);
+    crate::serial_write(b" slot=");
     let process = match load(
         image,
         pid,
@@ -1451,7 +1516,14 @@ pub fn spawn_current_with_io(
         path,
         parent_creds,
     ) {
-        Ok(process) => process,
+        Ok(process) => {
+            unsafe {
+                crate::serial_write(b"spawn: entry=0x");
+                crate::serial_write_hex((*process.frame).rip);
+                crate::serial_write(b"\r\n");
+            }
+            process
+        }
         Err(_) => {
             unsafe {
                 (*frame).rax = crate::abi::trap::ENOEXEC as u64;
@@ -1459,6 +1531,8 @@ pub fn spawn_current_with_io(
             return frame;
         }
     };
+    // O `process.frame.rip` já contém o entry point correto (0x400100),
+    // definido pelo loader. Não precisamos sobrescrever.
     // O filho começa com stdio padrão e recebe as redireções pedidas em `io`.
     //
     // Deliberadamente *não* herdamos o resto da tabela de descritores do pai:
@@ -1477,16 +1551,27 @@ pub fn spawn_current_with_io(
     process.username = parent.username;
     process.username_length = parent.username_length;
     process.parent = parent_pid;
+    crate::serial_write(b"spawn: process.parent=");
+    crate::serial_write_hex(process.parent as u64);
+    crate::serial_write(b"\r\n");
     scheduler.processes[slot] = process;
     scheduler.count = scheduler.count.max(slot + 1);
     unsafe {
         (*frame).rax = pid as u64;
     }
+    // Diagnóstico: verificar se o frame.rip do processo está correto após ser colocado no scheduler
+    unsafe {
+        crate::serial_write(b"spawn: process.frame.rip=0x");
+        crate::serial_write_hex((*process.frame).rip);
+        crate::serial_write(b"\r\n");
+    }
+    // RCX já contém o endereço de retorno correto (salvo pelo stub de syscall
+    // como o RIP após a instrução `syscall`). Não sobrescrever com `rip`, que
+    // é o valor antigo do `initial_frame` e nunca é atualizado durante
+    // syscalls — sobrescrever faria o sysretq retornar para o entry point
+    // original em vez de continuar após o syscall.
     // Não chamamos `schedule` aqui: o pai (init) deve continuar executando
-    // após o spawn. O filho recém-criado será escalonado quando o pai ceder a
-    // CPU (via `waitpid`/`yield`) ou pelo timer. Chamar `schedule` agora
-    // faria o `sysretq` retornar para o filho em vez do pai, o que deixaria
-    // o pai "preso" no syscall e nunca continuaria a execução após o spawn.
+    // após o spawn.
     frame
 }
 
@@ -1643,6 +1728,9 @@ pub fn fork_current(frame: *mut TrapFrame) -> *mut TrapFrame {
 /// quando nenhum filho terminou, sem ceder a CPU — o padrão que supervisores
 /// de serviços (Horust) e shells de trabalho usam para varrer filhos.
 pub fn waitpid_current(frame: *mut TrapFrame, pid: i64, status_pointer: u64, options: i64) -> *mut TrapFrame {
+    crate::serial_write(b"waitpid_current: called pid=");
+    crate::serial_write_hex(pid as u64);
+    crate::serial_write(b"\r\n");
     // O slot do pai é capturado **uma vez**. Usar `scheduler.current` a cada
     // volta do laço era o bug: depois de `schedule` trocar de processo, o
     // `current` apontava para outro processo, e `waiting_for` era escrito nele.
@@ -1653,10 +1741,20 @@ pub fn waitpid_current(frame: *mut TrapFrame, pid: i64, status_pointer: u64, opt
         let parent_slot = scheduler.current;
         (parent_slot, scheduler.processes[parent_slot].pid, pid)
     };
+    crate::serial_write(b"waitpid: parent_slot=");
+    crate::serial_write_hex(parent_slot as u64);
+    crate::serial_write(b" parent_pid=");
+    crate::serial_write_hex(parent_pid as u64);
+    crate::serial_write(b"\r\n");
 
     // Primeiro procura um corpo já pronto (zumbi) para não bloquear sem motivo.
     loop {
         let (reaped, found_any) = reap_child(parent_pid, wanted, status_pointer);
+        crate::serial_write(b"waitpid: reap_child found_any=");
+        crate::serial_write(if found_any { b"1" } else { b"0" });
+        crate::serial_write(b" reaped=");
+        crate::serial_write_hex(reaped.unwrap_or(0) as u64);
+        crate::serial_write(b"\r\n");
         if let Some(child_pid) = reaped {
             unsafe {
                 (*frame).rax = child_pid as u64;
@@ -1709,7 +1807,9 @@ pub fn waitpid_current(frame: *mut TrapFrame, pid: i64, status_pointer: u64, opt
         unsafe {
             (*frame).rax = (-11i64) as u64; // EAGAIN
         }
+        crate::serial_write(b"waitpid: calling schedule_ex\r\n");
         let (next, _) = schedule_ex(frame, false);
+        crate::serial_write(b"waitpid: schedule_ex returned\r\n");
         return next;
     }
 }

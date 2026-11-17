@@ -63,7 +63,9 @@ pub fn console_write(frame: &mut TrapFrame) -> *mut TrapFrame {
     let length = (frame.rsi as usize).min(MAX_CONSOLE_WRITE);
     let mut buffer = [0u8; MAX_CONSOLE_WRITE];
     let rdi_bytes = frame.rdi.to_le_bytes();
-    crate::console_write("sys_write: rdi=");
+    crate::console_write("sys_write: pid=");
+    crate::serial_write_hex(crate::process::current_pid() as u64);
+    crate::console_write(" rdi=");
     crate::console_write_bytes(&rdi_bytes[..]);
     crate::console_write(" rsi=");
     let rsi_bytes = frame.rsi.to_le_bytes();
@@ -75,6 +77,7 @@ pub fn console_write(frame: &mut TrapFrame) -> *mut TrapFrame {
     }
     crate::console_write("sys_write: copy OK\r\n");
     crate::console_write_bytes(&buffer[..length]);
+    crate::serial_write(b"sys_write: returning ok\r\n");
     frame.ok(length as u64)
 }
 

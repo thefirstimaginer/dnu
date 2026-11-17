@@ -190,6 +190,16 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
         distro::init_from_bytes(settings);
     }
     framebuffer::set_hhdm_offset(boot_info.hhdm_offset);
+    // Inicializa o console de framebuffer com o framebuffer do Limine, para que
+    // SYS_FB_INFO/SYS_FB_MAP funcione no userspace (ws_server).
+    if !boot_info.framebuffer.is_null() {
+        let fb_response = unsafe { &*boot_info.framebuffer };
+        let mut fb_iter = unsafe { fb_response.framebuffers() };
+        if let Some(fb) = fb_iter.next() {
+            framebuffer::init(Some(fb), boot_info.hhdm_offset);
+            crate::serial_write(b"framebuffer: init ok\r\n");
+        }
+    }
     unsafe {
         core::ptr::write(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR), &mut allocator as *mut FrameAllocator);
     }
@@ -340,7 +350,8 @@ fn start_init() -> ! {
         crate::halt();
     }
     subsystems::mark_ready(Subsystem::InitProcess);
-    time::configure_timer_interrupt();
+    // Timer desabilitado temporariamente para diagnóstico
+    // time::configure_timer_interrupt();
     subsystems::mark_ready(Subsystem::Timer);
     crate::serial_write(b"Timer configured; preemptive priority scheduling active\r\n");
     crate::serial_write(b"about to call process::start\r\n");

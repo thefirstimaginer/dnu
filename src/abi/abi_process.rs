@@ -53,8 +53,11 @@ pub fn spawn_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
     crate::console_write_bytes(b"spawn_handler: path_ptr=0x");
     // caminho e tamanho são lidos abaixo
     let path_ptr = frame.rdi;
-    // caminho e tamanho são lidos abaixo
-    let path_ptr = frame.rdi;
+    crate::serial_write_hex(path_ptr);
+    crate::console_write_bytes(b"\r\n");
+    crate::serial_write(b"spawn_handler: rsi(path_len)=0x");
+    crate::serial_write_hex(frame.rsi);
+    crate::console_write_bytes(b"\r\n");
     let path_len = frame.rsi;
     // Escreve o ponteiro e tamanho em hex simples (debug)
     let mut ptr = path_ptr;
@@ -85,6 +88,9 @@ pub fn spawn_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
     // O caminho nunca excede a ABI de exec, então um buffer de 128 bytes basta.
     let mut path_buffer = [0u8; MAX_EXEC_ITEM_SIZE];
     let path_length = frame.rsi;
+    crate::serial_write(b"spawn_handler: path_length=");
+    crate::serial_write_hex(path_length);
+    crate::console_write_bytes(b"\r\n");
     let path = {
         let length = match usize::try_from(path_length) {
             Ok(length) => length,
@@ -94,48 +100,86 @@ pub fn spawn_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
             return frame.fail(EINVAL);
         }
         // Copia o caminho da memória do usuário para o buffer do kernel.
-        if !process::copy_from_current_user(frame.rdi, &mut path_buffer[..length]) {
+        crate::serial_write(b"spawn_handler: about to copy path from user\r\n");
+        let copy_ok = process::copy_from_current_user(frame.rdi, &mut path_buffer[..length]);
+        crate::console_write_bytes(b"spawn_handler: copy=");
+        crate::serial_write(if copy_ok { b"1" } else { b"0" });
+        crate::console_write_bytes(b"\r\n");
+        if !copy_ok {
+            crate::serial_write(b"spawn_handler: copy_from_user failed\r\n");
             return frame.fail(EFAULT);
         }
         match core::str::from_utf8(&path_buffer[..length]) {
-            Ok(path) => path,
-            Err(_) => return frame.fail(EINVAL),
+            Ok(path) => {
+                crate::console_write_bytes(b"spawn_handler: path=");
+                crate::console_write_bytes(path.as_bytes());
+                crate::console_write_bytes(b"\r\n");
+                path
+            }
+            Err(_) => {
+                crate::serial_write(b"spawn_handler: from_utf8 failed\r\n");
+                return frame.fail(EINVAL);
+            }
         }
     };
 
+    crate::serial_write(b"spawn_handler: path_copy_ok\r\n");
+
     let mut io = SpawnIo::default();
-    if frame.r8 != 0 && !copy_struct_from_user(frame.r8, &mut io) {
-        return frame.fail(EFAULT);
+    crate::serial_write(b"spawn_handler: r8=");
+    crate::serial_write_hex(frame.r8);
+    crate::console_write_bytes(b"\r\n");
+    if frame.r8 != 0 {
+        if !copy_struct_from_user(frame.r8, &mut io) {
+            crate::serial_write(b"spawn_handler: copy_struct_from_user failed\r\n");
+            return frame.fail(EFAULT);
+        }
+        crate::serial_write(b"spawn_handler: io_copied\r\n");
     }
 
     let argument_count = frame.r10 as usize;
+    crate::serial_write(b"spawn_handler: argument_count=");
+    crate::serial_write_hex(argument_count as u64);
+    crate::console_write_bytes(b"\r\n");
+
     if argument_count > MAX_EXEC_ARGS {
         return frame.fail(E2BIG);
     }
     let mut arguments = [[0u8; MAX_EXEC_ITEM_SIZE]; MAX_EXEC_ARGS];
     let mut argument_lengths = [0usize; MAX_EXEC_ARGS];
+    crate::serial_write(b"spawn_handler: about to load_user_vector(arguments)\r\n");
     if let Err(error) =
         load_user_vector(frame.rdx, argument_count, &mut arguments, &mut argument_lengths)
     {
+        crate::serial_write(b"spawn_handler: load_user_vector(arguments) failed\r\n");
         return frame.fail(error);
     }
+    crate::serial_write(b"spawn_handler: load_user_vector(arguments) ok\r\n");
 
     let environment_count = io.environment_count as usize;
+    crate::serial_write(b"spawn_handler: environment_count=");
+    crate::serial_write_hex(environment_count as u64);
+    crate::console_write_bytes(b"\r\n");
     if environment_count > MAX_EXEC_ENV {
         return frame.fail(E2BIG);
     }
     let mut environment = [[0u8; MAX_EXEC_ITEM_SIZE]; MAX_EXEC_ENV];
     let mut environment_lengths = [0usize; MAX_EXEC_ENV];
+    crate::serial_write(b"spawn_handler: about to load_user_vector(environment)\r\n");
     if let Err(error) = load_user_vector(
         io.environment,
         environment_count,
         &mut environment,
         &mut environment_lengths,
     ) {
+        crate::serial_write(b"spawn_handler: load_user_vector(environment) failed\r\n");
         return frame.fail(error);
     }
+    crate::serial_write(b"spawn_handler: load_user_vector(environment) ok\r\n");
 
-    crate::console_write_bytes(b"spawn_handler: calling spawn_current_with_io\r\n");
+    crate::serial_write(b"spawn_handler: calling spawn_current_with_io path=");
+    crate::serial_write(path.as_bytes());
+    crate::serial_write(b"\r\n");
     let result = process::spawn_current_with_io(
         path,
         &vector_slices(&arguments, &argument_lengths, argument_count),
@@ -150,6 +194,13 @@ pub fn spawn_handler(frame: &mut TrapFrame) -> *mut TrapFrame {
     if rcx_val == 0 { buf[i] = b'0'; i += 1; }
     while rcx_val > 0 { buf[i] = b'0' + (rcx_val % 16) as u8; if buf[i] > b'9' { buf[i] += 7; } i += 1; rcx_val /= 16; }
     while i > 0 { i -= 1; crate::console_write_bytes(&buf[i..i+1]); }
+    crate::console_write_bytes(b" rip=0x");
+    let mut rip_val = unsafe { (*result).rip };
+    let mut buf2 = [0u8; 16];
+    let mut j = 0;
+    if rip_val == 0 { buf2[j] = b'0'; j += 1; }
+    while rip_val > 0 { buf2[j] = b'0' + (rip_val % 16) as u8; if buf2[j] > b'9' { buf2[j] += 7; } j += 1; rip_val /= 16; }
+    while j > 0 { j -= 1; crate::console_write_bytes(&buf2[j..j+1]); }
     crate::console_write_bytes(b"\r\n");
     result
 }
