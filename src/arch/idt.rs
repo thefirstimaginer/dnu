@@ -879,6 +879,19 @@ pub fn configure_syscall_msrs() {
     crate::serial_write(b" SCE=");
     crate::serial_write(if efer & 1 != 0 { b"1" } else { b"0" });
     crate::serial_write(b"\r\n");
+
+    // Habilita SMEP (bit 20) e SMAP (bit 21) em CR4.
+    // SMEP impede o kernel de executar código em páginas de usuário.
+    // SMAP impede o kernel de acessar dados em páginas de usuário, exceto
+    // quando explícito com stac/clac. Isso reduz a superfície de ataques
+    // que confundem o kernel a acessar memória controlada por userspace.
+    unsafe {
+        let cr4: u64;
+        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        let cr4_new = cr4 | (1 << 20) | (1 << 21); // SMEP | SMAP
+        asm!("mov cr4, {}", in(reg) cr4_new, options(nomem, nostack, preserves_flags));
+    }
+    serial_write(b"step: CR4 SMEP/SMAP enabled\r\n");
 }
 
 fn serial_write(bytes: &[u8]) {
