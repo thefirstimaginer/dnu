@@ -187,3 +187,17 @@ check:
 	$(CARGO) check --release --target $(TARGET) --bin imagineos-dnu-kernel \
 		--manifest-path $(ROOT)/Cargo.toml \
 		--config 'target.x86_64-unknown-none.rustflags=["-C","relocation-model=static"]'
+
+# Executa clippy com lints rígidos no kernel e nas ferramentas de host.
+# Requer rustup component clippy: rustup component add clippy
+.PHONY: clippy
+clippy:
+	$(CARGO) clippy --release --target $(TARGET) --bin imagineos-dnu-kernel \
+		--manifest-path $(ROOT)/Cargo.toml \
+		--config 'target.x86_64-unknown-none.rustflags=["-C","relocation-model=static"]' \
+		-- -D warnings -D clippy::all -D clippy::pedantic \
+		-A clippy::missing_errors_doc -A clippy::missing_panics_doc \
+		-A clippy::module_name_repetitions -A clippy::too_many_arguments
+
+# Adiciona clippy também ao alvo `check` para CI.
+check: clippy
