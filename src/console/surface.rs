@@ -207,13 +207,23 @@ pub fn create(info: &mut SurfaceInfo) -> Result<(), i64> {
     Ok(())
 }
 
-fn find(surface_id: u32) -> Option<usize> {
+pub fn find(surface_id: u32) -> Option<usize> {
     let surfaces = surfaces();
     let slot = surface_id as usize;
     if slot >= MAX_SURFACES || surfaces.slots[slot].physical == 0 {
         return None;
     }
     Some(slot)
+}
+
+/// Retorna o PID dono da superfície, se existir.
+pub fn owner(surface_id: u32) -> Option<usize> {
+    let surfaces = surfaces();
+    let slot = surface_id as usize;
+    if slot >= MAX_SURFACES || surfaces.slots[slot].physical == 0 {
+        return None;
+    }
+    Some(surfaces.slots[slot].pid)
 }
 
 /// Reposiciona a superfície do processo atual. O dono é quem decide onde a

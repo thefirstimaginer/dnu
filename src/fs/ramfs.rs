@@ -44,6 +44,8 @@ struct OverlayNode {
     mode: u16,
     uid: u32,
     gid: u32,
+    created_at: u64,
+    modified_at: u64,
 }
 
 // Implement the OverlayNode struct with a constant EMPTY value and a method to get the path as a string
@@ -58,6 +60,8 @@ impl OverlayNode {
         mode: 0,
         uid: 0,
         gid: 0,
+        created_at: 0,
+        modified_at: 0,
     };
 
     fn path(&self) -> &str {
@@ -934,6 +938,7 @@ pub fn write_at_overlay(path: &str, offset: usize, input: &[u8]) -> Result<usize
     node.mode = metadata.map_or(0o644, |metadata| metadata.mode);
     node.uid = metadata.map_or(0, |metadata| metadata.uid);
     node.gid = metadata.map_or(0, |metadata| metadata.gid);
+    node.modified_at = crate::time::elapsed_microseconds().unwrap_or(0);
     fs.overlay[slot] = node;
     Ok(input.len())
 }
@@ -1195,6 +1200,9 @@ fn insert_overlay_as(
     node.mode = mode;
     node.uid = uid;
     node.gid = gid;
+    let now = crate::time::elapsed_microseconds().unwrap_or(0);
+    node.created_at = now;
+    node.modified_at = now;
     node.data_length = 0;
     Ok(())
 }

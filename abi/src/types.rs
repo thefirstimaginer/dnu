@@ -155,8 +155,8 @@ pub const PROCESS_WAITING: u32 = 3;
 /// Terminou, mas o pai ainda não coletou o status.
 pub const PROCESS_ZOMBIE: u32 = 4;
 // Large enough for a shell plus a handful of pipeline stages. Each slot costs a
-// 64 KiB kernel stack (see `KERNEL_STACKS`), so this is not free memory.
-pub const MAX_PROCESSES: usize = 16;
+// 128 KiB kernel stack (see `KERNEL_STACKS`), so this is not free memory.
+pub const MAX_PROCESSES: usize = 32;
 pub const PROCESS_NAME_SIZE: usize = 64;
 pub const ACCOUNT_NAME_SIZE: usize = 32;
 pub const ACCOUNT_PASSWORD_SIZE: usize = 64;

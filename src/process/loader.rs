@@ -252,6 +252,11 @@ pub fn load(
     let stack_start = stack_top
         .checked_sub(stack_size)
         .ok_or(LoadError::InvalidMapping)?;
+    // Guard page: a pagina imediatamente abaixo de `stack_start` fica
+    // intencionalmente nao mapeada. Qualquer stack overflow abaixo do limite
+    // da pilha gera page fault (SIGSEGV) em vez de silenciosamente corromper
+    // memoria adjacente. Nenhum outro mapeamento deve ser permitido abaixo de
+    // `stack_start`.
     crate::serial_write(b"loader: map stack pages\n");
     let mut page = stack_start;
     while page < stack_top {
