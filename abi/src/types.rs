@@ -163,6 +163,26 @@ pub const ACCOUNT_PASSWORD_SIZE: usize = 64;
 pub const HOSTNAME_SIZE: usize = 64;
 
 // ------------------------------------------------------------------------------
+// dzImage: flags e assinatura opcional (ed25519)
+// ------------------------------------------------------------------------------
+
+/// Bit 0 dos flags do cabeçalho dzImage: imagem assinada (assinatura de 64 bytes
+/// armazenada após a tabela de membros).
+pub const DZIMAGE_FLAG_SIGNED: u32 = 1;
+
+/// Tamanho de uma assinatura ed25519 (64 bytes).
+pub const DZIMAGE_SIGNATURE_SIZE: usize = 64;
+
+/// Chave pública ed25519 embarcada no kernel para verificação de dzImage assinado.
+/// Substituir pela chave real antes de produzir imagens de release.
+pub const DZIMAGE_PUBLIC_KEY: [u8; 32] = [
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+    0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+];
+
+// ------------------------------------------------------------------------------
 // Descritores de arquivo e flags de abertura.
 // ------------------------------------------------------------------------------
 
