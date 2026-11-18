@@ -154,11 +154,11 @@ pub enum FrameLocation {
     At(*mut TrapFrame),
 }
 
-/// Endereço na base da pilha de kernel de `slot` onde `execve` monta o frame
+/// Endereço na base da pilha de kernel onde `execve` monta o frame
 /// do novo programa sem sobrepor o frame da syscall em andamento.
-pub fn execve_frame_scratch(slot: usize) -> Option<*mut TrapFrame> {
-    let stacks = unsafe { &mut *KERNEL_STACKS.0.get() };
-    let base = stacks.0[slot].as_mut_ptr() as usize;
+/// Recebe o topo da pilha de kernel do processo (alocado dinamicamente).
+pub fn execve_frame_scratch(kernel_stack_top: u64) -> Option<*mut TrapFrame> {
+    let base = kernel_stack_top as usize - KERNEL_STACK_SIZE as usize;
     let offset = 2 * size_of::<TrapFrame>();
     if offset >= KERNEL_STACK_SIZE {
         return None;
@@ -294,16 +294,23 @@ pub fn load(
     }
     crate::serial_write(b"loader: setup frame\n");
 
+    // Aloca a pilha de kernel dinamicamente. Se falhar (OOM), usa o array
+    // estático KERNEL_STACKS[slot] como fallback.
+    let kernel_stack_top = match location {
+        FrameLocation::TopOfSlot(slot) => crate::process::scheduler::allocate_kernel_stack()
+            .unwrap_or_else(|| {
+                let stacks = unsafe { &mut *KERNEL_STACKS.0.get() };
+                stacks.0[slot].as_mut_ptr() as u64 + KERNEL_STACK_SIZE as u64
+            }),
+        FrameLocation::At(_) => {
+            crate::process::scheduler::allocate_kernel_stack()
+                .unwrap_or(0)
+        }
+    };
     let frame = match location {
         FrameLocation::At(pointer) => pointer,
-        FrameLocation::TopOfSlot(slot) => {
-            let stacks_ptr = KERNEL_STACKS.0.get();
-            crate::serial_write(b"loader: stacks_ptr=0x");
-            crate::serial_write_hex(stacks_ptr as u64);
-            crate::serial_write(b"\r\n");
-            let stacks = unsafe { &mut *stacks_ptr };
-            let top = stacks.0[slot].as_mut_ptr() as u64 + KERNEL_STACK_SIZE as u64;
-            (top as usize - size_of::<TrapFrame>()) as *mut TrapFrame
+        FrameLocation::TopOfSlot(_) => {
+            (kernel_stack_top as usize - size_of::<TrapFrame>()) as *mut TrapFrame
         }
     };
     crate::serial_write(b"loader: frame=0x");
@@ -362,6 +369,7 @@ pub fn load(
         wake_deadline: 0,
         mappings: [crate::process::Mapping::EMPTY; crate::process::MAX_MAPPINGS],
         mapping_count: 0,
+        kernel_stack_top,
     };
     // Inicializa o estado FPU com `fninit` + `fxsave` num buffer alinhado a
     // 16 bytes, e depois copia para o campo do processo. O `fxsave` exige
