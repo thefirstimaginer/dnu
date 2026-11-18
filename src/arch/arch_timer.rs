@@ -30,10 +30,12 @@ pub extern "C" fn handle_interrupt(frame: *mut TrapFrame) -> *mut TrapFrame {
 /// # Safety
 /// The caller must ensure `port` is a valid I/O port for the operation.
 pub unsafe fn out_byte(port: u16, value: u8) {
-    core::arch::asm!(
-        "out dx, al",
-        in("dx") port,
-        in("al") value,
-        options(nomem, nostack, preserves_flags)
-    );
+    unsafe {
+        core::arch::asm!(
+            "out dx, al",
+            in("dx") port,
+            in("al") value,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
 }

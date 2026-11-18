@@ -362,17 +362,17 @@ static mut NEXT_FRAME_VALID: bool = false;
 /// Funções de acesso para ler os valores salvos do próximo frame.
 /// Chamadas pelo assembly do syscall stub antes do iretq.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dreamcore_next_rip() -> u64 { NEXT_FRAME_RIP }
+pub unsafe extern "C" fn dreamcore_next_rip() -> u64 { unsafe { NEXT_FRAME_RIP } }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dreamcore_next_cs() -> u64 { NEXT_FRAME_CS }
+pub unsafe extern "C" fn dreamcore_next_cs() -> u64 { unsafe { NEXT_FRAME_CS } }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dreamcore_next_rflags() -> u64 { NEXT_FRAME_RFLAGS }
+pub unsafe extern "C" fn dreamcore_next_rflags() -> u64 { unsafe { NEXT_FRAME_RFLAGS } }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dreamcore_next_rsp() -> u64 { NEXT_FRAME_RSP }
+pub unsafe extern "C" fn dreamcore_next_rsp() -> u64 { unsafe { NEXT_FRAME_RSP } }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dreamcore_next_ss() -> u64 { NEXT_FRAME_SS }
+pub unsafe extern "C" fn dreamcore_next_ss() -> u64 { unsafe { NEXT_FRAME_SS } }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dreamcore_next_valid() -> u8 { if NEXT_FRAME_VALID { 1 } else { 0 } }
+pub unsafe extern "C" fn dreamcore_next_valid() -> u8 { unsafe { if NEXT_FRAME_VALID { 1 } else { 0 } } }
 
 /// Carrega todos os valores do próximo frame em um bloco de 5 u64 (RIP, CS,
 /// RFLAGS, RSP, SS) apontado por `dst`. Chamada pelo assembly antes do iretq.
@@ -399,11 +399,13 @@ pub(crate) static mut NEXT_CR3_VALID_PUB: bool = false;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dreamcore_get_next_cr3() -> u64 {
-    if NEXT_CR3_VALID_PUB {
-        NEXT_CR3_VALID_PUB = false;
-        NEXT_CR3_PUB
-    } else {
-        0
+    unsafe {
+        if NEXT_CR3_VALID_PUB {
+            NEXT_CR3_VALID_PUB = false;
+            NEXT_CR3_PUB
+        } else {
+            0
+        }
     }
 }
 
@@ -711,7 +713,7 @@ extern "C" fn dreamcore_gp_handler(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dreamcore_save_next_frame(frame: *mut crate::abi::trap::TrapFrame) {
     if frame.is_null() {
-        NEXT_FRAME_VALID = false;
+        unsafe { NEXT_FRAME_VALID = false; }
         return;
     }
     unsafe {
@@ -723,11 +725,11 @@ pub unsafe extern "C" fn dreamcore_save_next_frame(frame: *mut crate::abi::trap:
         NEXT_FRAME_VALID = true;
     }
     serial_write(b"save_next_frame: rip=0x");
-    crate::serial_write_hex(NEXT_FRAME_RIP);
+    unsafe { crate::serial_write_hex(NEXT_FRAME_RIP); }
     serial_write(b" cs=0x");
-    crate::serial_write_hex(NEXT_FRAME_CS);
+    unsafe { crate::serial_write_hex(NEXT_FRAME_CS); }
     serial_write(b" rsp=0x");
-    crate::serial_write_hex(NEXT_FRAME_RSP);
+    unsafe { crate::serial_write_hex(NEXT_FRAME_RSP); }
     serial_write(b"\r\n");
 }
 
@@ -736,16 +738,16 @@ pub unsafe extern "C" fn dreamcore_save_next_frame(frame: *mut crate::abi::trap:
 /// stub antes do `iretq`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dreamcore_restore_next_frame(frame: *mut crate::abi::trap::TrapFrame) {
-    if frame.is_null() || !NEXT_FRAME_VALID {
+    if frame.is_null() || unsafe { !NEXT_FRAME_VALID } {
         serial_write(b"restore_next_frame: INVALID or null\r\n");
         return;
     }
     serial_write(b"restore_next_frame: rip=0x");
-    crate::serial_write_hex(NEXT_FRAME_RIP);
+    unsafe { crate::serial_write_hex(NEXT_FRAME_RIP); }
     serial_write(b" cs=0x");
-    crate::serial_write_hex(NEXT_FRAME_CS);
+    unsafe { crate::serial_write_hex(NEXT_FRAME_CS); }
     serial_write(b" rsp=0x");
-    crate::serial_write_hex(NEXT_FRAME_RSP);
+    unsafe { crate::serial_write_hex(NEXT_FRAME_RSP); }
     serial_write(b"\r\n");
     unsafe {
         (*frame).rip = NEXT_FRAME_RIP;
@@ -850,13 +852,15 @@ pub fn init() {
 unsafe fn rdmsr(msr: u32) -> u64 {
     let eax: u32;
     let edx: u32;
-    core::arch::asm!(
-        "rdmsr",
-        in("ecx") msr,
-        out("eax") eax,
-        out("edx") edx,
-        options(nostack)
-    );
+    unsafe {
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") msr,
+            out("eax") eax,
+            out("edx") edx,
+            options(nostack)
+        );
+    }
     ((edx as u64) << 32) | (eax as u64)
 }
 
@@ -981,6 +985,8 @@ fn serial_hex(mut value: u64) {
 
 unsafe fn in_port(port: u16) -> u8 {
     let value: u8;
-    asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags));
+    unsafe {
+        asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags));
+    }
     value
 }

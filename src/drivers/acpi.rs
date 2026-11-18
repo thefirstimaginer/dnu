@@ -169,136 +169,144 @@ unsafe fn discover_acpi_power_registers(
     rsdp_address: u64,
     hhdm_offset: u64,
 ) -> Option<AcpiPowerRegisters> {
-    let Some(rsdp) = physical_bytes(rsdp_address, hhdm_offset, 36) else {
-        crate::console_write("ACPI RSDP address is not mapped\n");
-        return None;
-    };
-    if &rsdp[..8] != b"RSD PTR " || !checksum_valid(&rsdp[..20]) {
-        crate::console_write("ACPI RSDP signature or checksum is invalid\n");
-        return None;
-    }
+    unsafe {
+        let Some(rsdp) = physical_bytes(rsdp_address, hhdm_offset, 36) else {
+            crate::console_write("ACPI RSDP address is not mapped\n");
+            return None;
+        };
+        if &rsdp[..8] != b"RSD PTR " || !checksum_valid(&rsdp[..20]) {
+            crate::console_write("ACPI RSDP signature or checksum is invalid\n");
+            return None;
+        }
 
-    let revision = rsdp[15];
-    let (root_address, root_signature) = if revision >= 2 {
-        let length = read_u32(&rsdp, 20)? as usize;
-        if !(36..=4096).contains(&length) {
-            return None;
-        }
-        let extended = physical_bytes(rsdp_address, hhdm_offset, length)?;
-        if !checksum_valid(&extended) {
-            return None;
-        }
-        let xsdt = read_u64(&extended, 24)?;
-        if xsdt != 0 {
-            (xsdt, b"XSDT" as &[u8])
-        } else {
-            (read_u32(&extended, 16)? as u64, b"RSDT" as &[u8])
-        }
-    } else {
-        (read_u32(&rsdp, 16)? as u64, b"RSDT" as &[u8])
-    };
-    let Some(root) = acpi_table(root_address, hhdm_offset) else {
-        crate::console_write("ACPI root table is invalid or unmapped\n");
-        return None;
-    };
-    if &root[..4] != root_signature {
-        crate::console_write("ACPI root table signature does not match RSDP\n");
-        return None;
-    }
-    let entry_size = if root_signature == b"XSDT" { 8 } else { 4 };
-    if (root.len() - ACPI_HEADER_SIZE) % entry_size != 0 {
-        return None;
-    }
-    for entry in root[ACPI_HEADER_SIZE..].chunks_exact(entry_size) {
-        let address = if entry_size == 8 {
-            read_u64(entry, 0)?
-        } else {
-            read_u32(entry, 0)? as u64
-        };
-        let Some(fadt) = acpi_table(address, hhdm_offset) else {
-            continue;
-        };
-        if &fadt[..4] == b"FACP" {
-            let registers = parse_fadt_power_registers(&fadt, hhdm_offset);
-            if registers.is_none() {
-                crate::console_write("ACPI FADT has no supported S5/PM1 configuration\n");
+        let revision = rsdp[15];
+        let (root_address, root_signature) = if revision >= 2 {
+            let length = read_u32(&rsdp, 20)? as usize;
+            if !(36..=4096).contains(&length) {
+                return None;
             }
-            return registers;
+            let extended = physical_bytes(rsdp_address, hhdm_offset, length)?;
+            if !checksum_valid(&extended) {
+                return None;
+            }
+            let xsdt = read_u64(&extended, 24)?;
+            if xsdt != 0 {
+                (xsdt, b"XSDT" as &[u8])
+            } else {
+                (read_u32(&extended, 16)? as u64, b"RSDT" as &[u8])
+            }
+        } else {
+            (read_u32(&rsdp, 16)? as u64, b"RSDT" as &[u8])
+        };
+        let Some(root) = acpi_table(root_address, hhdm_offset) else {
+            crate::console_write("ACPI root table is invalid or unmapped\n");
+            return None;
+        };
+        if &root[..4] != root_signature {
+            crate::console_write("ACPI root table signature does not match RSDP\n");
+            return None;
         }
+        let entry_size = if root_signature == b"XSDT" { 8 } else { 4 };
+        if (root.len() - ACPI_HEADER_SIZE) % entry_size != 0 {
+            return None;
+        }
+        for entry in root[ACPI_HEADER_SIZE..].chunks_exact(entry_size) {
+            let address = if entry_size == 8 {
+                read_u64(entry, 0)?
+            } else {
+                read_u32(entry, 0)? as u64
+            };
+            let Some(fadt) = acpi_table(address, hhdm_offset) else {
+                continue;
+            };
+            if &fadt[..4] == b"FACP" {
+                let registers = parse_fadt_power_registers(&fadt, hhdm_offset);
+                if registers.is_none() {
+                    crate::console_write("ACPI FADT has no supported S5/PM1 configuration\n");
+                }
+                return registers;
+            }
+        }
+        crate::console_write("ACPI root table contains no valid FADT\n");
+        None
     }
-    crate::console_write("ACPI root table contains no valid FADT\n");
-    None
 }
 
 unsafe fn parse_fadt_power_registers(fadt: &[u8], hhdm_offset: u64) -> Option<AcpiPowerRegisters> {
-    let dsdt_address = if fadt.len() >= 148 {
-        read_u64(fadt, 140)?.max(read_u32(fadt, 40)? as u64)
-    } else {
-        read_u32(fadt, 40)? as u64
-    };
-    let Some(dsdt) = acpi_table(dsdt_address, hhdm_offset) else {
-        crate::console_write("ACPI DSDT is invalid or unmapped\n");
-        return None;
-    };
-    if &dsdt[..4] != b"DSDT" {
-        crate::console_write("ACPI DSDT address has the wrong signature\n");
-        return None;
-    }
-    let Some((sleep_type_a, sleep_type_b)) = parse_s5_sleep_types(&dsdt[ACPI_HEADER_SIZE..]) else {
-        crate::console_write("ACPI DSDT does not expose a supported _S5_ package\n");
-        return None;
-    };
-
-    let flags = read_u32(fadt, 112).unwrap_or(0);
-    let hardware_reduced = flags & (1 << 20) != 0;
-    let (pm1a_control, pm1b_control, sleep_control, smi_command, acpi_enable) = if hardware_reduced
-    {
-        (None, None, parse_gas(fadt, 244, 8), 0, 0)
-    } else {
-        let control_length = fadt.get(89).copied().unwrap_or(2);
-        let pm1a = parse_pm1_register(fadt, 64, 172, control_length);
-        let pm1b = parse_pm1_register(fadt, 68, 184, control_length);
-        if pm1a.is_none() {
-            crate::console_write("ACPI FADT has no usable PM1a control register\n");
+    unsafe {
+        let dsdt_address = if fadt.len() >= 148 {
+            read_u64(fadt, 140)?.max(read_u32(fadt, 40)? as u64)
+        } else {
+            read_u32(fadt, 40)? as u64
+        };
+        let Some(dsdt) = acpi_table(dsdt_address, hhdm_offset) else {
+            crate::console_write("ACPI DSDT is invalid or unmapped\n");
+            return None;
+        };
+        if &dsdt[..4] != b"DSDT" {
+            crate::console_write("ACPI DSDT address has the wrong signature\n");
             return None;
         }
-        let smi_command = u16::try_from(read_u32(fadt, 48)?).unwrap_or(0);
-        (pm1a, pm1b, None, smi_command, fadt[52])
-    };
-    if hardware_reduced && sleep_control.is_none() {
-        crate::console_write("ACPI FADT has no usable Sleep Control register\n");
-        return None;
-    }
+        let Some((sleep_type_a, sleep_type_b)) = parse_s5_sleep_types(&dsdt[ACPI_HEADER_SIZE..]) else {
+            crate::console_write("ACPI DSDT does not expose a supported _S5_ package\n");
+            return None;
+        };
 
-    Some(AcpiPowerRegisters {
-        pm1a_control,
-        pm1b_control,
-        sleep_control,
-        sleep_type_a,
-        sleep_type_b,
-        smi_command,
-        acpi_enable,
-        hhdm_offset,
-    })
+        let flags = read_u32(fadt, 112).unwrap_or(0);
+        let hardware_reduced = flags & (1 << 20) != 0;
+        let (pm1a_control, pm1b_control, sleep_control, smi_command, acpi_enable) = if hardware_reduced
+        {
+            (None, None, parse_gas(fadt, 244, 8), 0, 0)
+        } else {
+            let control_length = fadt.get(89).copied().unwrap_or(2);
+            let pm1a = parse_pm1_register(fadt, 64, 172, control_length);
+            let pm1b = parse_pm1_register(fadt, 68, 184, control_length);
+            if pm1a.is_none() {
+                crate::console_write("ACPI FADT has no usable PM1a control register\n");
+                return None;
+            }
+            let smi_command = u16::try_from(read_u32(fadt, 48)?).unwrap_or(0);
+            (pm1a, pm1b, None, smi_command, fadt[52])
+        };
+        if hardware_reduced && sleep_control.is_none() {
+            crate::console_write("ACPI FADT has no usable Sleep Control register\n");
+            return None;
+        }
+
+        Some(AcpiPowerRegisters {
+            pm1a_control,
+            pm1b_control,
+            sleep_control,
+            sleep_type_a,
+            sleep_type_b,
+            smi_command,
+            acpi_enable,
+            hhdm_offset,
+        })
+    }
 }
 
 unsafe fn acpi_table<'a>(address: u64, hhdm_offset: u64) -> Option<&'a [u8]> {
-    let header = physical_bytes(address, hhdm_offset, ACPI_HEADER_SIZE)?;
-    let length = read_u32(&header, 4)? as usize;
-    if !(ACPI_HEADER_SIZE..=ACPI_TABLE_MAX_SIZE).contains(&length) {
-        return None;
+    unsafe {
+        let header = physical_bytes(address, hhdm_offset, ACPI_HEADER_SIZE)?;
+        let length = read_u32(&header, 4)? as usize;
+        if !(ACPI_HEADER_SIZE..=ACPI_TABLE_MAX_SIZE).contains(&length) {
+            return None;
+        }
+        let table = physical_bytes(address, hhdm_offset, length)?;
+        checksum_valid(&table).then_some(table)
     }
-    let table = physical_bytes(address, hhdm_offset, length)?;
-    checksum_valid(&table).then_some(table)
 }
 
 unsafe fn physical_bytes<'a>(address: u64, hhdm_offset: u64, length: usize) -> Option<&'a [u8]> {
-    if !crate::paging::map_hhdm_range(hhdm_offset, address, length, false) {
-        return None;
+    unsafe {
+        if !crate::paging::map_hhdm_range(hhdm_offset, address, length, false) {
+            return None;
+        }
+        let virtual_address = hhdm_offset.checked_add(address)?;
+        let pointer = usize::try_from(virtual_address).ok()? as *const u8;
+        Some(core::slice::from_raw_parts(pointer, length))
     }
-    let virtual_address = hhdm_offset.checked_add(address)?;
-    let pointer = usize::try_from(virtual_address).ok()? as *const u8;
-    Some(core::slice::from_raw_parts(pointer, length))
 }
 
 fn checksum_valid(bytes: &[u8]) -> bool {
@@ -374,93 +382,97 @@ fn io_register(address: u64, bit_width: u8) -> Option<AcpiRegister> {
 }
 
 unsafe fn read_register(register: AcpiRegister, hhdm_offset: u64) -> Option<u64> {
-    match register.address_space {
-        1 => match register.bit_width {
-            8 => {
-                let value: u8;
-                asm!(
-                    "in al, dx",
-                    in("dx") u16::try_from(register.address).ok()?,
-                    out("al") value,
-                    options(nomem, nostack, preserves_flags)
-                );
-                Some(u64::from(value))
-            }
-            16 => {
-                let value: u16;
-                asm!(
-                    "in ax, dx",
-                    in("dx") u16::try_from(register.address).ok()?,
-                    out("ax") value,
-                    options(nomem, nostack, preserves_flags)
-                );
-                Some(u64::from(value))
-            }
-            32 => {
-                let value: u32;
-                asm!(
-                    "in eax, dx",
-                    in("dx") u16::try_from(register.address).ok()?,
-                    out("eax") value,
-                    options(nomem, nostack, preserves_flags)
-                );
-                Some(u64::from(value))
+    unsafe {
+        match register.address_space {
+            1 => match register.bit_width {
+                8 => {
+                    let value: u8;
+                    asm!(
+                        "in al, dx",
+                        in("dx") u16::try_from(register.address).ok()?,
+                        out("al") value,
+                        options(nomem, nostack, preserves_flags)
+                    );
+                    Some(u64::from(value))
+                }
+                16 => {
+                    let value: u16;
+                    asm!(
+                        "in ax, dx",
+                        in("dx") u16::try_from(register.address).ok()?,
+                        out("ax") value,
+                        options(nomem, nostack, preserves_flags)
+                    );
+                    Some(u64::from(value))
+                }
+                32 => {
+                    let value: u32;
+                    asm!(
+                        "in eax, dx",
+                        in("dx") u16::try_from(register.address).ok()?,
+                        out("eax") value,
+                        options(nomem, nostack, preserves_flags)
+                    );
+                    Some(u64::from(value))
+                }
+                _ => None,
+            },
+            0 => {
+                let pointer = mmio_register_pointer(register, hhdm_offset)?;
+                Some(match register.bit_width {
+                    8 => core::ptr::read_volatile(pointer.cast::<u8>()) as u64,
+                    16 => core::ptr::read_volatile(pointer.cast::<u16>()) as u64,
+                    32 => core::ptr::read_volatile(pointer.cast::<u32>()) as u64,
+                    64 => core::ptr::read_volatile(pointer.cast::<u64>()),
+                    _ => return None,
+                })
             }
             _ => None,
-        },
-        0 => {
-            let pointer = mmio_register_pointer(register, hhdm_offset)?;
-            Some(match register.bit_width {
-                8 => core::ptr::read_volatile(pointer.cast::<u8>()) as u64,
-                16 => core::ptr::read_volatile(pointer.cast::<u16>()) as u64,
-                32 => core::ptr::read_volatile(pointer.cast::<u32>()) as u64,
-                64 => core::ptr::read_volatile(pointer.cast::<u64>()),
-                _ => return None,
-            })
         }
-        _ => None,
     }
 }
 
 unsafe fn write_register(register: AcpiRegister, value: u64, hhdm_offset: u64) -> Option<()> {
-    match register.address_space {
-        1 => {
-            let port = u16::try_from(register.address).ok()?;
-            match register.bit_width {
-                8 => asm!(
-                    "out dx, al",
-                    in("dx") port,
-                    in("al") value as u8,
-                    options(nomem, nostack, preserves_flags)
-                ),
-                16 => asm!(
-                    "out dx, ax",
-                    in("dx") port,
-                    in("ax") value as u16,
-                    options(nomem, nostack, preserves_flags)
-                ),
-                32 => asm!(
-                    "out dx, eax",
-                    in("dx") port,
-                    in("eax") value as u32,
-                    options(nomem, nostack, preserves_flags)
-                ),
-                _ => return None,
+    unsafe {
+        match register.address_space {
+            1 => {
+                let port = u16::try_from(register.address).ok()?;
+                match register.bit_width {
+                    8 => asm!(
+                        "out dx, al",
+                        in("dx") port,
+                        in("al") value as u8,
+                        options(nomem, nostack, preserves_flags)
+                    ),
+                    16 => asm!(
+                        "out dx, ax",
+                        in("dx") port,
+                        in("ax") value as u16,
+                        options(nomem, nostack, preserves_flags)
+                    ),
+                    32 => asm!(
+                        "out dx, eax",
+                        in("dx") port,
+                        in("eax") value as u32,
+                        options(nomem, nostack, preserves_flags)
+                    ),
+                    _ => return None,
+                }
+                Some(())
             }
-            Some(())
-        }
-        0 => {
-            let pointer = mmio_register_pointer(register, hhdm_offset)?;
-            match register.bit_width {
-                8 => core::ptr::write_volatile(pointer.cast::<u8>(), value as u8),
-                16 => core::ptr::write_volatile(pointer.cast::<u16>(), value as u16),
-                32 => core::ptr::write_volatile(pointer.cast::<u32>(), value as u32),
-                64 => core::ptr::write_volatile(pointer.cast::<u64>(), value),
-                _ => return None,
+            0 => {
+                let pointer = mmio_register_pointer(register, hhdm_offset)?;
+                match register.bit_width {
+                    8 => core::ptr::write_volatile(pointer.cast::<u8>(), value as u8),
+                    16 => core::ptr::write_volatile(pointer.cast::<u16>(), value as u16),
+                    32 => core::ptr::write_volatile(pointer.cast::<u32>(), value as u32),
+                    64 => core::ptr::write_volatile(pointer.cast::<u64>(), value),
+                    _ => return None,
+                }
+                Some(())
             }
-            Some(())
+            _ => None,
         }
-        _ => None,
     }
 }
 

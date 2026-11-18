@@ -40,7 +40,9 @@ pub fn init() {
 /// `area` deve apontar para uma região válida de pelo menos `FXSAVE_SIZE`
 /// bytes, alinhada a 16 bytes, gravável pelo kernel.
 pub unsafe fn save(area: *mut u8) {
-    asm!("fxsave [{}]", in(reg) area, options(nostack, preserves_flags));
+    unsafe {
+        asm!("fxsave [{}]", in(reg) area, options(nostack, preserves_flags));
+    }
 }
 
 /// Restaura o estado de FPU/SSE previamente salvo por [`save`].
@@ -48,7 +50,9 @@ pub unsafe fn save(area: *mut u8) {
 /// # Safety
 /// `area` deve conter um estado válido previamente produzido por `fxsave`.
 pub unsafe fn restore(area: *const u8) {
-    asm!("fxrstor [{}]", in(reg) area, options(nostack, preserves_flags));
+    unsafe {
+        asm!("fxrstor [{}]", in(reg) area, options(nostack, preserves_flags));
+    }
 }
 
 /// Zera/limpa a área de FXSAVE para um estado inicial previsível.
@@ -59,6 +63,8 @@ pub unsafe fn restore(area: *const u8) {
 /// # Safety
 /// As mesmas exigências de [`save`].
 pub unsafe fn reset(area: *mut u8) {
-    asm!("fninit", options(nomem, nostack, preserves_flags));
-    save(area);
+    unsafe {
+        asm!("fninit", options(nomem, nostack, preserves_flags));
+        save(area);
+    }
 }

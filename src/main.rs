@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![deny(unsafe_op_in_unsafe_fn)]
 #![allow(missing_docs)]
 use core::arch::asm;
 use core::mem::MaybeUninit;

@@ -98,7 +98,9 @@ pub fn framebuffer_response() -> Option<&'static limine::response::FramebufferRe
 }
 
 unsafe fn out(port: u16, value: u8) {
-    asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
+    unsafe {
+        asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
+    }
 }
 
 /// HHDM offset padrão usado no boot direto. Em endereço baixo (identity-mapped)

@@ -96,11 +96,15 @@ fn write_byte(byte: u8) {
 }
 
 unsafe fn out(port: u16, value: u8) {
-    asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
+    unsafe {
+        asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
+    }
 }
 
 unsafe fn in_port(port: u16) -> u8 {
     let value: u8;
-    asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags));
+    unsafe {
+        asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags));
+    }
     value
 }
