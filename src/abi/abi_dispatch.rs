@@ -13,8 +13,9 @@ use crate::abi::{
     SYS_OPEN, SYS_PIPE, SYS_PIVOT_ROOT, SYS_POINTER_POSITION, SYS_POWER_OFF, SYS_PROCESS_LIST,
     SYS_READ, SYS_READ_FD, SYS_READ_FILE, SYS_READDIR, SYS_REMOVE, SYS_SBRK, SYS_SHUTDOWN_POLL,
     SYS_SHUTDOWN_REQUEST, SYS_SIGACTION, SYS_SIGRETURN, SYS_SPAWN, SYS_STAT, SYS_SURFACE_CREATE,
-    SYS_SURFACE_DESTROY, SYS_SURFACE_FLUSH, SYS_SURFACE_MOVE, SYS_SURFACE_POLL, SYS_SURFACE_PRESENT,
-    SYS_SURFACE_SEND_EVENT, SYS_SYSTEM_INFO, SYS_SET_TLS,
+    SYS_SURFACE_DESTROY, SYS_SURFACE_FLUSH, SYS_SURFACE_MOVE, SYS_SURFACE_POLL,
+    SYS_SURFACE_SNAPSHOT, SYS_SURFACE_PRESENT, SYS_SURFACE_SEND_EVENT, SYS_SYSTEM_INFO,
+    SYS_SET_TLS,
     SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_TLS_INFO, SYS_TOUCH, SYS_WAITPID, SYS_WRITE,
     SYS_WRITE_FD, SYS_WRITE_FILE, SYS_YIELD,
 };
@@ -26,8 +27,50 @@ use super::thread as thread_calls;
 use super::trap::{TrapFrame, ENOSYS};
 use crate::abi::{display, fs, system};
 use crate::drivers::ata;
+use crate::memory::PAGE_SIZE;
 use crate::process;
 use crate::process::SCHEDULER;
+
+/// Syscalls que recebem ponteiros de espaço de usuário em registradores.
+/// Para essas, validamos que o ponteiro (quando não-nulo) esteja dentro de
+/// `USER_MIN..USER_MAX` antes de despachar para o handler.
+const SYSCALLS_WITH_USER_PTRS: &[u64] = &[
+    SYS_EXEC, SYS_EXECVE, SYS_SPAWN, SYS_SIGACTION, SYS_MUNMAP,
+    SYS_OPEN, SYS_READ_FD, SYS_WRITE_FD, SYS_FSTAT, SYS_ISDIR, SYS_ISFILE,
+    SYS_READ_FILE, SYS_READDIR, SYS_STAT, SYS_WRITE_FILE, SYS_MKDIR,
+    SYS_TOUCH, SYS_REMOVE, SYS_WRITE, SYS_FB_INFO, SYS_FB_MAP,
+    SYS_SURFACE_CREATE, SYS_SURFACE_PRESENT, SYS_SURFACE_FLUSH,
+    SYS_SURFACE_DESTROY, SYS_SURFACE_POLL, SYS_SURFACE_SNAPSHOT,
+    SYS_SURFACE_SEND_EVENT, SYS_SURFACE_MOVE, SYS_SYSTEM_INFO,
+    SYS_SBRK,
+];
+
+/// Valida ponteiros de espaço de usuário antes do dispatch da syscall.
+///
+/// Retorna `Ok(())` se todos os ponteiros são válidos (ou zero, quando
+/// permitido), ou `Err(errno)` se algum ponteiro estiver fora do espaço
+/// de usuário (`USER_MIN..USER_MAX`).
+fn validate_syscall_pointers(syscall: u64, rdi: u64, rsi: u64, rdx: u64) -> Result<(), i64> {
+    if !SYSCALLS_WITH_USER_PTRS.contains(&syscall) {
+        return Ok(());
+    }
+    const USER_MIN: u64 = 0x400000;
+    const USER_MAX: u64 = 0x0000_8000_0000_0000;
+    for ptr in [rdi, rsi, rdx] {
+        if ptr == 0 {
+            continue;
+        }
+        if !(USER_MIN..USER_MAX).contains(&ptr) {
+            return Err(-14 /* EFAULT */);
+        }
+        // O ponteiro deve estar dentro do espaço de usuário.
+        let page = ptr & !(PAGE_SIZE - 1);
+        if page >= USER_MAX {
+            return Err(-14 /* EFAULT */);
+        }
+    }
+    Ok(())
+}
 
 // Entrada chamada pelo stub `syscall`.
 #[unsafe(no_mangle)]
@@ -127,6 +170,16 @@ fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
     let Some(frame) = (unsafe { frame.as_mut() }) else {
         return frame;
     };
+    // Validação centralizada de ponteiros de espaço de usuário: rejeita
+    // ponteiros além de USER_MAX antes de entregar ao handler específico.
+    if let Err(errno) = validate_syscall_pointers(
+        frame.rax,
+        frame.rdi,
+        frame.rsi,
+        frame.rdx,
+    ) {
+        return frame.fail(errno);
+    }
     match frame.rax {
         // --- processo, sinais e exec --------------------------------------
         SYS_YIELD => {
