@@ -1,6 +1,10 @@
 use crate::memory;
 use core::arch::asm;
 use core::ptr;
+use core::sync::atomic::AtomicUsize;
+
+extern crate alloc;
+use alloc::boxed::Box;
 
 const PAGE_SIZE: u64 = 4096;
 const ENTRY_PRESENT: u64 = 1;
@@ -16,10 +20,78 @@ const RSVD_MASK: u64 = 0x7ff0_0000_0000_0000;
 const USER_MIN: u64 = 0x400000;
 const USER_MAX: u64 = 0x0000_8000_0000_0000;
 
+/// Número máximo de páginas rastreadas como COW por address space.
+const MAX_COW_PAGES: usize = 256;
+
+/// Tabela de páginas Copy-on-Write compartilhada entre pai e filho após `fork`.
+///
+/// Cada entrada é um endereço virtual de página que está marcado como COW
+/// (somente leitura na PTE). Quando um processo escreve em uma dessas páginas,
+/// o handler de page fault aloca uma cópia privada.
+#[repr(C)]
+pub struct CowTable {
+    pages: [u64; MAX_COW_PAGES],
+    count: AtomicUsize,
+}
+
+impl CowTable {
+    const EMPTY: Self = Self {
+        pages: [0; MAX_COW_PAGES],
+        count: AtomicUsize::new(0),
+    };
+
+    /// Adiciona uma página à tabela COW. Retorna false se a tabela estiver cheia.
+    pub fn add(&mut self, page: u64) -> bool {
+        let n = self.count.load(core::sync::atomic::Ordering::Relaxed);
+        if n >= MAX_COW_PAGES {
+            return false;
+        }
+        // Verifica duplicata
+        for i in 0..n {
+            if self.pages[i] == page {
+                return true;
+            }
+        }
+        self.pages[n] = page;
+        self.count.store(n + 1, core::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    /// Verifica se uma página está marcada como COW.
+    pub fn contains(&self, page: u64) -> bool {
+        let n = self.count.load(core::sync::atomic::Ordering::Relaxed);
+        for i in 0..n {
+            if self.pages[i] == page {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Remove uma página da tabela COW (após a cópia ter sido feita).
+    pub fn remove(&mut self, page: u64) {
+        let mut n = self.count.load(core::sync::atomic::Ordering::Relaxed);
+        let mut found = false;
+        for i in 0..n {
+            if found {
+                self.pages[i - 1] = self.pages[i];
+            } else if self.pages[i] == page {
+                found = true;
+            }
+        }
+        if found {
+            self.count.store(n - 1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct AddressSpace {
     pub root_physical: u64,
     pub allocator: *mut memory::FrameAllocator,
+    /// Ponteiro para a tabela COW compartilhada (pai e filho apontam para a
+    /// mesma tabela após `fork`). NULL quando não há páginas COW.
+    pub cow_table: *mut CowTable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,9 +140,11 @@ impl AddressSpace {
             let destination = root.virtual_address.cast::<u64>();
             ptr::copy_nonoverlapping(source.add(256), destination.add(256), 256);
         }
+        let cow_table = Box::into_raw(Box::new(CowTable::EMPTY));
         Some(Self {
             root_physical: root.physical_address,
             allocator,
+            cow_table,
         })
     }
 
@@ -230,11 +304,63 @@ impl AddressSpace {
     }
 
     pub fn clone_user(&self) -> Option<Self> {
-        let clone = Self::new_user(unsafe { &mut *self.allocator })?;
-        if self.copy_user_pages(&clone) == 0 {
-            return None;
+        let current_root = read_cr3() & ADDRESS_MASK;
+        let root = memory::allocate_frame(unsafe { &mut *self.allocator })?;
+        unsafe {
+            ptr::write_bytes(root.virtual_address, 0, PAGE_SIZE as usize);
+            let source = memory::phys_to_virt(unsafe { &*self.allocator }, current_root)?.cast::<u64>();
+            let destination = root.virtual_address.cast::<u64>();
+            ptr::copy_nonoverlapping(source.add(256), destination.add(256), 256);
         }
-        Some(clone)
+        // COW: o clone compartilha a mesma tabela COW do pai. As páginas não são
+        // copiadas aqui; são marcadas como somente leitura (removido ENTRY_WRITABLE)
+        // e registradas na CowTable. Na primeira escrita, o page fault handler
+        // aloca uma cópia privada.
+        let cow_table = self.cow_table;
+        Some(Self {
+            root_physical: root.physical_address,
+            allocator: self.allocator,
+            cow_table,
+        })
+    }
+
+    /// Marca todas as páginas de usuário mapeadas como somente leitura (COW)
+    /// e as registra na CowTable. Chamado pelo loader após `fork` para que pai
+    /// e filho compartilhem as páginas até a primeira escrita.
+    pub fn mark_all_pages_cow(&self) {
+        let cow_table = unsafe { self.cow_table.as_mut() };
+        if cow_table.is_none() {
+            return;
+        }
+        let cow_table = cow_table.unwrap();
+        self.mark_range_cow(self.root_physical, 0, cow_table);
+    }
+
+    fn mark_range_cow(&self, table_physical: u64, level: u8, cow_table: &mut CowTable) {
+        let Some(table) = table_pointer(table_physical) else {
+            return;
+        };
+        for index in 0..512usize {
+            let entry = unsafe { *table.add(index) };
+            if entry & ENTRY_PRESENT == 0 {
+                continue;
+            }
+            if level == 1 {
+                // PTE: se é página de usuário (ENTRY_USER), remove ENTRY_WRITABLE
+                // e registra na CowTable.
+                if entry & ENTRY_USER != 0 {
+                    let page = entry & ADDRESS_MASK;
+                    let new_entry = entry & !ENTRY_WRITABLE;
+                    unsafe { *table.add(index) = new_entry };
+                    cow_table.add(page);
+                }
+                continue;
+            }
+            if entry & ENTRY_HUGE != 0 {
+                continue;
+            }
+            self.mark_range_cow(entry & ADDRESS_MASK, level - 1, cow_table);
+        }
     }
 
     fn copy_user_pages(&self, destination: &Self) -> usize {

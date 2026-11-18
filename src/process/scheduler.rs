@@ -1717,6 +1717,12 @@ pub fn fork_current(frame: *mut TrapFrame) -> *mut TrapFrame {
         return frame;
     };
 
+    // COW: marca todas as páginas do pai e do filho como somente leitura,
+    // registradas na CowTable compartilhada. Na primeira escrita, o page fault
+    // handler aloca uma cópia privada.
+    parent_space.mark_all_pages_cow();
+    child_space.mark_all_pages_cow();
+
     // O filho retoma exatamente onde o pai estava, mas com `rax = 0`.
     // Tenta alocar pilha de kernel dinamicamente; se falhar, usa o array estático.
     let kernel_stack_top = allocate_kernel_stack()

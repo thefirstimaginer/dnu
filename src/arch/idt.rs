@@ -1,6 +1,10 @@
 use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
 use core::mem::size_of;
+use core::ptr::{self, null_mut};
+
+use crate::memory;
+use crate::paging;
 
 global_asm!(
     r#"
@@ -461,6 +465,53 @@ extern "C" fn dreamcore_exception_handler(
             // Retoma a instrução que faltou (`iretq` para o mesmo `rip`).
             unsafe {
                 dreamcore_resume_trap_frame(frame);
+            }
+        }
+
+        // COW: escrita em página marcada como Copy-on-Write (somente leitura
+        // na PTE, registrada na CowTable). Aloca uma cópia privada, mapeia
+        // como gravável e retoma a instrução.
+        if vector == 14
+            && error & 0b010 != 0
+            && cs & 3 == 3
+            && frame != null_mut()
+        {
+            let page = cr2 & !(crate::memory::PAGE_SIZE - 1);
+            let cow_handled = crate::process::with_current_space(|space| {
+                let cow_table = unsafe { space.cow_table.as_mut() };
+                if let Some(ct) = cow_table {
+                    if ct.contains(page) {
+                        // Aloca nova página e copia o conteúdo da original.
+                        let allocator = unsafe { &mut *space.allocator };
+                        let Some(new_frame) = memory::allocate_frame(allocator) else {
+                            return false;
+                        };
+                        let old_virt = memory::phys_to_virt(allocator, page)
+                            .unwrap_or(core::ptr::null_mut());
+                        if old_virt.is_null() {
+                            return false;
+                        }
+                        unsafe {
+                            core::ptr::write_bytes(new_frame.virtual_address, 0, crate::memory::PAGE_SIZE as usize);
+                            core::ptr::copy_nonoverlapping(old_virt, new_frame.virtual_address, crate::memory::PAGE_SIZE as usize);
+                        }
+                        // Remove da CowTable e mapeia como gravável.
+                        ct.remove(page);
+                        let _ = crate::process::with_current_space(|s| {
+                            s.map_user_page_writable(page).is_ok()
+                        });
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            });
+            if cow_handled {
+                unsafe {
+                    dreamcore_resume_trap_frame(frame);
+                }
             }
         }
 
