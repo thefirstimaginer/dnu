@@ -38,6 +38,7 @@ mod dzimage;
 mod distro;
 #[path = "config/config.rs"]
 mod config;
+pub mod sync;
 #[path = "subsystems/subsystems.rs"]
 mod subsystems;
 use subsystems::Subsystem;
