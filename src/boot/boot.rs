@@ -18,6 +18,7 @@ use core::ptr;
 
 use limine::BaseRevision;
 use limine::memory_map::Entry;
+use limine::memory_map::EntryType;
 use limine::request::{
     FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, RsdpRequest, StackSizeRequest,
 };
@@ -66,6 +67,16 @@ static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(1024 * 1024);
 
 static EMPTY_RESERVED: [PhysicalRange; 1] = [PhysicalRange::EMPTY];
+
+/// Entradas de memory map para o boot direto (`direct_start`).
+/// Uma única região USABLE cobrindo a RAM acessível, para que o alocador de
+/// frames encontre regiões usáveis sem depender do Limine.
+#[unsafe(link_section = ".data")]
+static mut DIRECT_MEMORY_ENTRIES: [Entry; 1] = [Entry {
+    base: 0x100_000,      // 1 MiB, acima da página zero
+    length: 512 * 1024 * 1024, // 512 MiB
+    entry_type: EntryType::USABLE,
+}];
 
 /// Nome do módulo que o `limine.conf` do dzImage passa ao Limine.
 const DZIMAGE_MODULE: &[u8] = b"dzImage";
@@ -210,6 +221,16 @@ pub fn direct_start() -> ! {
     let initramfs_end = unsafe { &_initramfs_end as *const u8 };
     let initramfs_size = initramfs_end as usize - initramfs_start as usize;
 
+    // Verificar integridade do dzImage também no boot direto.
+    let initramfs_bytes = unsafe { core::slice::from_raw_parts(initramfs_start, initramfs_size) };
+    if let Err(error) = crate::dzimage::verify(initramfs_bytes, crate::abi::ABI_VERSION) {
+        crate::serial_write(b"boot: direct_start dzImage verify FAILED: ");
+        crate::serial_write(error.as_bytes());
+        crate::serial_write(b"\r\n");
+        crate::halt();
+    }
+    crate::serial_write(b"boot: direct_start dzImage verify OK\r\n");
+
     let reserved: &[PhysicalRange] = &EMPTY_RESERVED;
 
     let tsc_start = crate::time::read_tsc();
@@ -240,8 +261,8 @@ pub fn direct_start() -> ! {
     }
 
     let boot_info = BootInfo {
-        memory_entries: ptr::null(),
-        memory_entries_count: 0,
+        memory_entries: unsafe { core::ptr::addr_of!(DIRECT_MEMORY_ENTRIES) as *const Entry },
+        memory_entries_count: 1,
         framebuffer: ptr::null(),
         modules: &module_response as *const DirectModuleResponse as *const ModuleResponse,
         rsdp_address: 0,

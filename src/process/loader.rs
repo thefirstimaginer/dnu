@@ -222,13 +222,7 @@ pub fn load(
     location: FrameLocation,
     credentials: ProcessCredentials,
 ) -> Result<Process, LoadError> {
-    let allocator = unsafe {
-        let ptr_val = core::ptr::read(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR));
-        if ptr_val.is_null() {
-            return Err(LoadError::OutOfMemory);
-        }
-        &mut *ptr_val
-    };
+    let allocator = unsafe { crate::ALLOCATOR.assume_init_mut() };
     crate::serial_write(b"loader: load \"");
     crate::serial_write(name.as_bytes());
     crate::serial_write(b"\" pid=");

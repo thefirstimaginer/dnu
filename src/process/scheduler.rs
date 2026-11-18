@@ -1130,6 +1130,13 @@ fn next_deadline(scheduler: &Scheduler) -> Option<u64> {
 /// prazo é cumprido na granularidade do tick (~10 ms) — a imprecisão normal de
 /// um kernel sem timer de alta resolução.
 fn idle_until_next_deadline() {
+    // Se o TSC não foi calibrado, o relógio monotônico não avança. Entrar em
+    // hlt aqui travaria o sistema para sempre. Em vez disso, retorna imediatamente
+    // para que o escalonador siga em frente (sem preempção baseada em tempo).
+    if crate::time::tsc_frequency() == 0 {
+        crate::serial_write(b"idle: TSC nao calibrado; pulando hlt\r\n");
+        return;
+    }
     let Some(deadline) = next_deadline(unsafe { &*SCHEDULER.0.get() }) else {
         return;
     };
@@ -1288,7 +1295,11 @@ fn schedule(frame: *mut TrapFrame, exiting: bool) -> *mut TrapFrame {
         return next.frame;
     }
 
-    crate::kernel_halt()
+    // Sem candidato rodável: não halte silenciosamente. Imprime um diagnóstico
+    // e entra em hlt controlado, para que seja visível no log serial por que o
+    // sistema parou (ex.: PID 1 saiu e não há outro processo).
+    crate::serial_write(b"schedule: no runnable process; halting\r\n");
+    crate::halt()
 }
 
 pub fn spawn_current(

@@ -464,42 +464,9 @@ extern "C" fn dreamcore_exception_handler(
             }
         }
 
-        // Se um acesso de instrução (I/D=1) ocorre em um endereço abaixo de
-        // 0x400000 (não mapeado no userspace), provavelmente é uma syscall
-        // (`int 0x80` ou `syscall`, 2 bytes) cujo endereço de retorno não pôde
-        // ser restaurado corretamente. Pula a instrução (2 bytes) e retoma a
-        // execução, permitindo que o processo continue após a syscall falha.
-        if vector == 14 && error & 0b1_0000 != 0 && cr2 < 0x400000 {
-            crate::serial_write(b"user pf: skipping faulting instruction at cr2=0x");
-            crate::serial_write_hex(cr2);
-            crate::serial_write(b"\r\n");
-            if !frame.is_null() {
-                unsafe {
-                    (*frame).rip = cr2 + 2;
-                }
-            }
-            unsafe {
-                dreamcore_resume_trap_frame(frame);
-            }
-        }
-
-        // GP fault em userspace (ex: instrução `out`/`in` de porta I/O não
-        // permitida em ring 3). Pula a instrução (geralmente 2 bytes) e
-        // continua, permitindo que o processo sobreviga a acessos de porta
-        // que o kernel ainda não emula.
-        if vector == 13 {
-            crate::serial_write(b"user gp: skipping faulting instruction at rip=0x");
-            crate::serial_write_hex(rip);
-            crate::serial_write(b"\r\n");
-            if !frame.is_null() {
-                unsafe {
-                    (*frame).rip = rip + 2;
-                }
-            }
-            unsafe {
-                dreamcore_resume_trap_frame(frame);
-            }
-        }
+        // Exceções em userspace nunca pulam instruções nem retomam a execução
+        // após uma falha de instrução ou de proteção geral. O processo é
+        // terminado com sinal apropriado pelo fluxo abaixo.
 
         crate::serial_log_timestamp();
         serial_write(b"User process fault; terminating PID ");

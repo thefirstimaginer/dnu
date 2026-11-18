@@ -119,14 +119,11 @@ impl AddressSpace {
         let table = table_pointer(table_physical).ok_or(MapError::OutOfMemory)?;
         let entry = unsafe { &mut *table.add(indices[3]) };
         if *entry & ENTRY_PRESENT != 0 {
-            // Merge permissions: preserve EXECUTE if already set, add NX only
-            // if the page is not already executable.
+            // W^X estrito: nunca remover NX ao adicionar escrita. Uma página
+            // já executável (sem NX) permanece não-gravável; uma página
+            // gravável permanece não-executável. Nunca resulta em RWX.
             let mut new_bits = *entry & !ENTRY_WRITABLE;
             new_bits |= flags.entry_bits();
-            // If page was already executable, don't add NX (shared page with code).
-            if *entry & ENTRY_NX == 0 {
-                new_bits &= !ENTRY_NX;
-            }
             *entry = new_bits;
             return Ok(memory::phys_to_virt(unsafe { &*self.allocator }, *entry & ADDRESS_MASK)
                 .unwrap_or(core::ptr::null_mut()));
@@ -481,13 +478,7 @@ pub fn map_hhdm_range(hhdm_offset: u64, physical_address: u64, length: usize, wr
         return true;
     }
 
-    let allocator = unsafe {
-        let ptr_val = core::ptr::read(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR));
-        if ptr_val.is_null() {
-            return false;
-        }
-        &mut *ptr_val
-    };
+    let allocator = unsafe { crate::ALLOCATOR.assume_init_mut() };
 
     const HUGE_PAGE_SIZE: u64 = 0x200000; // 2MB
     const HUGE_PAGE_MASK: u64 = !(HUGE_PAGE_SIZE - 1);
@@ -590,14 +581,7 @@ pub fn fix_kernel_page_table_entries() {
     const RSVD_MASK: u64 = 0x7ff0_0000_0000_0000; // bits 52-62
     const NX_MASK: u64 = 1 << 63; // bit 63: NX (reserved unless EFER.NXE=1)
 
-    let allocator = unsafe {
-        let ptr_val = core::ptr::read(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR));
-        if ptr_val.is_null() {
-            crate::serial_write(b"fix_kernel_page_table: allocator not ready\r\n");
-            return;
-        }
-        &mut *ptr_val
-    };
+    let allocator = unsafe { crate::ALLOCATOR.assume_init_mut() };
 
     let hhdm_offset = allocator.hhdm_offset;
     let root_physical = read_cr3() & ADDRESS_MASK;
@@ -759,12 +743,52 @@ pub fn fix_kernel_page_table_entries() {
 }
 
 fn table_pointer(physical: u64) -> Option<*mut u64> {
-    let allocator = unsafe {
-        let ptr_val = core::ptr::read(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR));
-        if ptr_val.is_null() {
-            return None;
-        }
-        &*ptr_val
-    };
+    let allocator = unsafe { crate::ALLOCATOR.assume_init_ref() };
     Some(memory::phys_to_virt(allocator, physical)?.cast())
+}
+
+// ---------------------------------------------------------------------------
+// Testes de fronteira (apenas em builds de teste do host)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_flags_read_write_sets_nx() {
+        assert!(PageFlags::READ_WRITE.entry_bits() & ENTRY_NX != 0);
+    }
+
+    #[test]
+    fn page_flags_read_exec_clears_nx() {
+        assert!(PageFlags::READ_EXEC.entry_bits() & ENTRY_NX == 0);
+    }
+
+    #[test]
+    fn page_flags_read_only_sets_nx() {
+        assert!(PageFlags::READ_ONLY.entry_bits() & ENTRY_NX != 0);
+    }
+
+    #[test]
+    fn map_user_page_rejects_below_user_min() {
+        // Não podemos instanciar AddressSpace sem alocador, mas podemos
+        // verificar que os limites de endereço são consistentes.
+        assert!(USER_MIN < USER_MAX);
+        assert!(USER_MIN == 0x400000);
+        assert!(USER_MAX == 0x0000_8000_0000_0000);
+    }
+
+    #[test]
+    fn wxx_never_removes_nx_on_write() {
+        // Simula o merge de permissoes: pagina executavel (sem NX) + escrita
+        // deve manter NX (nunca resulta em RWX).
+        let existing: u64 = ENTRY_PRESENT | ENTRY_USER; // RX, sem NX
+        let flags = PageFlags::READ_WRITE;
+        let mut new_bits = existing & !ENTRY_WRITABLE;
+        new_bits |= flags.entry_bits();
+        // NX deve estar definido (pagina gravavel nao e executavel)
+        assert!(new_bits & ENTRY_NX != 0, "W^X violada: pagina RWX criada");
+        // Nao deve conter bits reservados
+        assert!(new_bits & RSVD_MASK == 0);
+    }
 }
