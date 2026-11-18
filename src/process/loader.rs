@@ -16,6 +16,7 @@ use crate::process::{
     FpuState, Priority, Process, KERNEL_STACK_SIZE, KERNEL_STACKS, MAX_EXEC_ARGS, MAX_EXEC_ENV,
     PAGE_SIZE, USER_HEAP_START, USER_STACK_SIZE, USER_STACK_TOP,
 };
+use crate::process::scheduler::oom_kill;
 use crate::process::def::{self, Def};
 use crate::abi::def::DefPermissions;
 
@@ -235,7 +236,15 @@ pub fn load(
     })?;
     crate::serial_write(b"loader: parse DEF ok\n");
     crate::serial_write(b"loader: new_user space\n");
-    let address_space = AddressSpace::new_user(allocator).ok_or(LoadError::OutOfMemory)?;
+    let address_space = AddressSpace::new_user(allocator).or_else(|| {
+        // Sem frames físicos: tenta liberar memória matando o processo de
+        // menor prioridade (OOM killer) antes de desistir.
+        if oom_kill() {
+            AddressSpace::new_user(allocator)
+        } else {
+            None
+        }
+    }).ok_or(LoadError::OutOfMemory)?;
     crate::serial_write(b"loader: map_segments\n");
     map_segments(&image, &address_space)?;
     crate::serial_write(b"loader: map_segments ok\n");

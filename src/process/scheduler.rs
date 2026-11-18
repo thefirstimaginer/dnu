@@ -826,6 +826,41 @@ pub fn send_signal(pid: usize, signal: u64) -> i64 {
     0
 }
 
+/// Mata o processo de menor prioridade (excluindo PID 1) para liberar memória
+/// quando o sistema está sem frames físicos (OOM).
+///
+/// Retorna `true` se um processo foi selecionado para terminação, `false` se
+/// não houver candidato (apenas PID 1 ou nenhum processo ativo).
+pub(crate) fn oom_kill() -> bool {
+    let scheduler = unsafe { &*SCHEDULER.0.get() };
+    let mut victim: Option<(usize, usize, Priority)> = None; // (slot, pid, priority)
+    for (slot, process) in scheduler.processes.iter().enumerate() {
+        if !process.active || process.pid == 1 || process.zombie {
+            continue;
+        }
+        // Menor valor de prioridade = menos importante (Idle=0 < Low=1 < ...)
+        let cand = (slot, process.pid, process.priority);
+        victim = match victim {
+            None => Some(cand),
+            Some((_, _, cur_prio)) if cand.2 < cur_prio => Some(cand),
+            Some(cur) => Some(cur),
+        };
+    }
+    drop(scheduler);
+
+    let Some((slot, pid, _)) = victim else {
+        return false;
+    };
+    crate::serial_write(b"oom_kill: terminating pid=");
+    crate::serial_write_hex(pid as u64);
+    crate::serial_write(b" slot=");
+    crate::serial_write_hex(slot as u64);
+    crate::serial_write(b"\r\n");
+    // Envia SIGKILL ao processo vítima
+    let _ = send_signal(pid, crate::abi::SIGNAL_KILL as u64);
+    true
+}
+
 pub fn set_signal_action(signal: u64, handler: u64, restorer: u64) -> i64 {
     if !valid_signal(signal)
         || signal == crate::abi::SIGNAL_KILL
