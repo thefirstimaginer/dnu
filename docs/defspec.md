@@ -4,7 +4,7 @@ O **DEF** (DNU Executable Format) é o formato nativo de executáveis do Kernel 
 
 > **Nota importante**: Apenas programas DEF são suportados por distros que usam o DNU como base. O kernel continua sendo compilado em ELF para compatibilidade com o bootloader Limine. O loader ELF foi removido do kernel: qualquer imagem que não comece com o magic `DNUF` (0x44 0x4E 0x55 0x46) é rejeitada.
 
-O DNU não é um sistema Unix-like. Não há `fork()`, `execve()` nem separação entre criar processo e carregar imagem. Em vez disso, o kernel expõe uma **única função de execução** no estilo Windows NT: o caller passa todos os parâmetros necessários (caminho da imagem, argumentos, ambiente, descritores de I/O, etc.) e o kernel carrega, inicializa e inicia o programa em uma só chamada.
+O DNU não é um sistema Unix-like. Não há `fork()`, `execve()` nem separação entre criar processo e carregar imagem. Em vez disso, o kernel expõe uma **única função de execução**: o caller passa todos os parâmetros necessários (caminho da imagem, argumentos, ambiente, descritores de I/O, etc.) e o kernel carrega, inicializa e inicia o programa em uma só chamada.
 
 ---
 
@@ -160,9 +160,9 @@ Os dados brutos dos segmentos começam imediatamente após a tabela de segmentos
 
 ---
 
-## Execução no Kernel (Convênio NT)
+## Execução no Kernel
 
-O DNU não segue o modelo Unix de `fork()` + `execve()`. Existe **uma única função de execução** (no estilo Windows NT) que recebe todos os parâmetros necessários para carregar e iniciar o programa:
+O DNU não segue o modelo Unix de `fork()` + `execve()`. Existe **uma única função de execução** que recebe todos os parâmetros necessários para carregar e iniciar o programa:
 
 ```
 SYS_EXEC_IMAGE(path, argv, argc, envp, envc, stdio_fds, flags)
@@ -399,7 +399,7 @@ EOF
 | Parsing | Complexo, múltiplas passagens | Zero-copy, single-pass |
 | Assinatura | Externa (GPG, sbctl) | Embutida (Ed25519 no cabeçalho) |
 | Stack/Heap | Convenção / linker script | Explícito no cabeçalho |
-| Modelo de execução | fork() + execve() (Unix) | Única função SYS_EXEC_IMAGE (estilo NT) |
+| Modelo de execução | fork() + execve() (Unix) | Única função SYS_EXEC_IMAGE |
 | Integridade | CRC/sumário externo | Assinatura Ed25519 embutida |
 | Extensão | `.elf`, sem extensão, `.so` | Sem extensão (binários em `/bin`, `/sbin`) |
 
@@ -421,7 +421,7 @@ EOF
 
 | Versão | Data | Alterações |
 |--------|------|------------|
-| 1.1 | 2026-11-19 | Ajustado para escopo DNU: sem fork()/execve(), convenção NT com SYS_EXEC_IMAGE único, sem CRC32, assinatura Ed25519 embutida, cabeçalho 96 bytes, segmentos 40 bytes |
+| 1.1 | 2026-11-19 | Ajustado para escopo DNU: sem fork()/execve(), única função de execução SYS_EXEC_IMAGE, sem CRC32, assinatura Ed25519 embutida, cabeçalho 96 bytes, segmentos 40 bytes |
 | 1.0 | 2026-11-04 | Especificação inicial (base unix-like, com CRC32) |
 
 ---
