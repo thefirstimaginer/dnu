@@ -73,7 +73,7 @@ Se qualquer símbolo não puder ser resolvido, o carregamento falha com `ERR_SYM
 | `/Libraries/<app>/` | Bibliotecas privadas de uma aplicação |
 | `/System/Users/<usuario>/local#Libraries/` | Bibliotecas de usuário |
 
-Convenção de nomeação: `lib<nome>.dnu` (ex: `libc.dnu`, `libm.dnu`, `libdl.dnu`).
+Convenção de nomeação: `lib<nome>.dll` (ex: `libc.dll`).
 
 ---
 
