@@ -7,8 +7,6 @@
 
 extern crate alloc;
 
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use core::convert::TryInto;
 
 pub const MAGIC: &[u8; 8] = b"DZIMAGE\0";
@@ -17,6 +15,12 @@ pub const HEADER_SIZE: usize = 32;
 const ENTRY_SIZE: usize = 24;
 pub const KIND_KERNEL: u32 = 1;
 pub const KIND_INITRAMFS: u32 = 2;
+
+/// Flags do cabeçalho dzImage (offset 28-31).
+pub const FLAG_SIGNED: u32 = 1 << 0;
+
+/// Tamanho da assinatura ed25519, armazenada após a tabela de membros.
+pub const SIGNATURE_SIZE: usize = 64;
 
 /// Maior payload aceito (initramfs em USTAR não comprimido).
 pub const MAX_MEMBER_SIZE: usize = 1024 * 1024 * 1024;
@@ -108,35 +112,53 @@ pub fn align8(value: usize) -> usize {
 }
 
 /// Valida o cabeçalho, a tabela e o CRC-32 de uma imagem em memória.
-pub fn verify(image: &[u8], expected_abi: u64) -> Result<(), String> {
+///
+/// Se o bit `FLAG_SIGNED` estiver definido nos flags do cabeçalho (offset 28),
+/// também verifica que existe uma assinatura de 64 bytes após a tabela de
+/// membros. A validação criptográfica da assinatura em si (ed25519) é um
+/// placeholder: atualmente apenas confirma a presença da assinatura. Substituir
+/// por uma verificação real com uma crate de criptografia antes de produção.
+pub fn verify(image: &[u8], expected_abi: u64) -> Result<(), UnpackError> {
     if image.len() < HEADER_SIZE {
-        return Err(String::from("truncated dzImage"));
+        return Err(UnpackError::InvalidHeader);
     }
     if &image[..8] != MAGIC {
-        return Err(String::from("invalid magic"));
+        return Err(UnpackError::InvalidHeader);
     }
-    let version = get_u32(image, 8).ok_or_else(|| String::from("truncated header"))?;
+    let version = get_u32(image, 8).ok_or(UnpackError::InvalidHeader)?;
     if version != VERSION {
-        let mut s = String::from("unsupported dzImage version ");
-        s.push_str(&version.to_string());
-        return Err(s);
+        return Err(UnpackError::InvalidHeader);
     }
-    let abi = get_u32(image, 12).ok_or_else(|| String::from("truncated header"))?;
+    let abi = get_u32(image, 12).ok_or(UnpackError::InvalidHeader)?;
     if u64::from(abi) != expected_abi {
-        let mut s = String::from("unsupported dzImage ABI ");
-        s.push_str(&abi.to_string());
-        s.push_str(", expected ");
-        s.push_str(&expected_abi.to_string());
-        return Err(s);
+        return Err(UnpackError::AbiMismatch);
     }
-    let entries = get_u32(image, 16).ok_or_else(|| String::from("truncated header"))?;
+    let entries = get_u32(image, 16).ok_or(UnpackError::InvalidHeader)?;
     let table_end = HEADER_SIZE
         .checked_add(entries as usize * ENTRY_SIZE)
-        .ok_or_else(|| String::from("overflow"))?;
+        .ok_or(UnpackError::InvalidSize)?;
     if image.len() < table_end {
-        return Err(String::from("truncated member table"));
+        return Err(UnpackError::InvalidSize);
     }
-    let expected = get_u32(image, 24).ok_or_else(|| String::from("truncated header"))?;
+
+    // Lê os flags do cabeçalho (offset 28-31).
+    let flags = get_u32(image, 28).ok_or(UnpackError::InvalidHeader)?;
+    let signed = flags & FLAG_SIGNED != 0;
+
+    // Se a imagem declara estar assinada, verifica presença da assinatura
+    // (64 bytes) imediatamente após a tabela de membros.
+    if signed {
+        let sig_end = table_end
+            .checked_add(SIGNATURE_SIZE)
+            .ok_or(UnpackError::InvalidSize)?;
+        if image.len() < sig_end {
+            return Err(UnpackError::InvalidSize);
+        }
+        // TODO: validar a assinatura ed25519 com DZIMAGE_PUBLIC_KEY.
+        // Por enquanto, apenas confirma a presença dos 64 bytes.
+    }
+
+    let expected = get_u32(image, 24).ok_or(UnpackError::InvalidHeader)?;
     let mut checksum = !0u32;
     for (i, &byte) in image.iter().enumerate() {
         if i >= 24 && i < 28 {
@@ -153,35 +175,62 @@ pub fn verify(image: &[u8], expected_abi: u64) -> Result<(), String> {
         }
     }
     if !checksum != expected {
-        return Err(String::from("checksum mismatch"));
+        return Err(UnpackError::ChecksumMismatch);
     }
     Ok(())
 }
 
 /// Extrai o membro `initramfs` do dzImage carregado pelo kernel.
 /// Devolve um `Member` com referência emprestada à imagem (sem alocação).
-#[cfg(target_os = "none")]
-pub fn initramfs_member<'a>(image: &'a [u8]) -> Result<Member<'a>, String> {
-    let abi = get_u32(image, 12).ok_or_else(|| String::from("truncated header"))?;
-    let count = get_u32(image, 16).ok_or_else(|| String::from("truncated header"))? as usize;
-    let table_end = HEADER_SIZE.checked_add(count * ENTRY_SIZE).ok_or_else(|| String::from("overflow"))?;
+///
+/// Disponível em todos os targets (incluindo host) para que os testes e a
+/// ferramenta `dnu-pack` possam usá-lo sem depender de `target_os = "none"`.
+pub fn initramfs_member<'a>(image: &'a [u8]) -> Result<Member<'a>, UnpackError> {
+    let _abi = get_u32(image, 12).ok_or(UnpackError::InvalidHeader)?;
+    let count = get_u32(image, 16).ok_or(UnpackError::InvalidHeader)? as usize;
+    let table_end = HEADER_SIZE.checked_add(count * ENTRY_SIZE).ok_or(UnpackError::InvalidSize)?;
     if image.len() < table_end {
-        return Err(String::from("truncated member table"));
+        return Err(UnpackError::InvalidSize);
     }
     for index in 0..count {
         let entry = HEADER_SIZE + index * ENTRY_SIZE;
-        let kind = get_u32(image, entry).ok_or_else(|| String::from("truncated member"))?;
-        let _flags = get_u32(image, entry + 4).ok_or_else(|| String::from("truncated member"))?;
-        let offset = get_u64(image, entry + 8).ok_or_else(|| String::from("truncated member"))?;
-        let size = get_u64(image, entry + 16).ok_or_else(|| String::from("truncated member"))?;
+        let kind = get_u32(image, entry).ok_or(UnpackError::InvalidHeader)?;
+        let _flags = get_u32(image, entry + 4).ok_or(UnpackError::InvalidHeader)?;
+        let offset = get_u64(image, entry + 8).ok_or(UnpackError::InvalidHeader)?;
+        let size = get_u64(image, entry + 16).ok_or(UnpackError::InvalidHeader)?;
         if kind == KIND_INITRAMFS {
             let data = image
                 .get(offset as usize..(offset + size) as usize)
-                .ok_or_else(|| String::from("truncated member payload"))?;
+                .ok_or(UnpackError::InvalidSize)?;
             return Ok(Member::from_data(kind, offset, size, data));
         }
     }
-    Err(String::from("initramfs member not found"))
+    Err(UnpackError::MissingMember)
+}
+
+/// Extrai o membro `kernel` do dzImage carregado pelo kernel.
+/// Devolve um `Member` com referência emprestada à imagem (sem alocação).
+pub fn kernel_member<'a>(image: &'a [u8]) -> Result<Member<'a>, UnpackError> {
+    let _abi = get_u32(image, 12).ok_or(UnpackError::InvalidHeader)?;
+    let count = get_u32(image, 16).ok_or(UnpackError::InvalidHeader)? as usize;
+    let table_end = HEADER_SIZE.checked_add(count * ENTRY_SIZE).ok_or(UnpackError::InvalidSize)?;
+    if image.len() < table_end {
+        return Err(UnpackError::InvalidSize);
+    }
+    for index in 0..count {
+        let entry = HEADER_SIZE + index * ENTRY_SIZE;
+        let kind = get_u32(image, entry).ok_or(UnpackError::InvalidHeader)?;
+        let _flags = get_u32(image, entry + 4).ok_or(UnpackError::InvalidHeader)?;
+        let offset = get_u64(image, entry + 8).ok_or(UnpackError::InvalidHeader)?;
+        let size = get_u64(image, entry + 16).ok_or(UnpackError::InvalidHeader)?;
+        if kind == KIND_KERNEL {
+            let data = image
+                .get(offset as usize..(offset + size) as usize)
+                .ok_or(UnpackError::InvalidSize)?;
+            return Ok(Member::from_data(kind, offset, size, data));
+        }
+    }
+    Err(UnpackError::MissingMember)
 }
 
 /// Itera sobre todos os membros do dzImage, chamando `f` com cada um.

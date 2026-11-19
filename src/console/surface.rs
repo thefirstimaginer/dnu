@@ -16,7 +16,7 @@
 //! buffer, e o servidor enxerga todos — o que é aceitável num sistema de
 //! desenvolvimento (o servidor é quem já controla a tela).
 
-use core::cell::UnsafeCell;
+use core::cell::UnsafeCell; // mantido para possíveis usos futuros, não removido para evitar quebra
 
 use crate::abi::{
     SurfaceEvent, SurfaceInfo, MAX_SURFACES, SURFACE_EVENT_HIDDEN, SURFACE_MAX_PIXELS,
@@ -111,12 +111,13 @@ struct Surfaces {
     events: [ClientEvents; crate::abi::MAX_PROCESSES],
 }
 
-struct SharedSurfaces(UnsafeCell<Surfaces>);
-unsafe impl Sync for SharedSurfaces {}
+use crate::sync::spinlock::SpinLock;
 
-// SAFETY: o acesso é mediado por interrupções desligadas nos handlers de
-// syscall (mesma disciplina das filas de entrada e de pipes).
-static SURFACES: SharedSurfaces = SharedSurfaces(UnsafeCell::new(Surfaces {
+struct SharedSurfaces(SpinLock<Surfaces>);
+// unsafe impl Sync for SharedSurfaces — não necessário: SpinLock já é Sync
+
+// SAFETY: o acesso é mediado por SpinLock, seguro para SMP.
+static SURFACES: SharedSurfaces = SharedSurfaces(SpinLock::new(Surfaces {
     slots: [Surface::EMPTY; MAX_SURFACES],
     z_counter: 0,
     dirty: [0; MAX_SURFACES],
@@ -127,8 +128,9 @@ static SURFACES: SharedSurfaces = SharedSurfaces(UnsafeCell::new(Surfaces {
     events: [ClientEvents::EMPTY; crate::abi::MAX_PROCESSES],
 }));
 
-fn surfaces() -> &'static mut Surfaces {
-    unsafe { &mut *SURFACES.0.get() }
+/// Retorna um guard para acessar as superfícies com proteção de spinlock.
+fn surfaces_lock() -> crate::sync::spinlock::SpinLockGuard<'static, Surfaces> {
+    SURFACES.0.lock()
 }
 
 /// Erros de superfície devolvidos como -errno.
@@ -147,19 +149,12 @@ pub fn create(info: &mut SurfaceInfo) -> Result<(), i64> {
     {
         return Err(EINVAL);
     }
-    let surfaces = surfaces();
+    let mut surfaces = surfaces_lock();
     let Some(slot) = (0..MAX_SURFACES).find(|&index| surfaces.slots[index].physical == 0) else {
         let _ = crate::kernel_log::append(b"surface: no free slots\n");
         return Err(ENOSPC);
     };
-    let allocator = unsafe {
-        let ptr_val = core::ptr::read(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR));
-        if ptr_val.is_null() {
-            let _ = crate::kernel_log::append(b"surface: allocator not ready\n");
-            return Err(ENOSPC);
-        }
-        &mut *ptr_val
-    };
+    let allocator = crate::memory::allocator_mut();
     let Some(frame) = crate::memory::allocate_frame(allocator) else {
         let _ = crate::kernel_log::append(b"surface: no frames\n");
         return Err(ENOSPC);
@@ -214,8 +209,8 @@ pub fn create(info: &mut SurfaceInfo) -> Result<(), i64> {
     Ok(())
 }
 
-fn find(surface_id: u32) -> Option<usize> {
-    let surfaces = surfaces();
+pub fn find(surface_id: u32) -> Option<usize> {
+    let mut surfaces = surfaces_lock();
     let slot = surface_id as usize;
     if slot >= MAX_SURFACES || surfaces.slots[slot].physical == 0 {
         return None;
@@ -223,11 +218,21 @@ fn find(surface_id: u32) -> Option<usize> {
     Some(slot)
 }
 
+/// Retorna o PID dono da superfície, se existir.
+pub fn owner(surface_id: u32) -> Option<usize> {
+    let mut surfaces = surfaces_lock();
+    let slot = surface_id as usize;
+    if slot >= MAX_SURFACES || surfaces.slots[slot].physical == 0 {
+        return None;
+    }
+    Some(surfaces.slots[slot].pid)
+}
+
 /// Reposiciona a superfície do processo atual. O dono é quem decide onde a
 /// própria janela fica (o WM movimenta as janelas dele; o painel fica onde
 /// nasceu).
 pub fn move_surface(surface_id: u32, x: i32, y: i32) -> Result<(), i64> {
-    let surfaces = surfaces();
+    let mut surfaces = surfaces_lock();
     let Some(slot) = find(surface_id) else {
         return Err(ENOENT);
     };
@@ -243,7 +248,7 @@ pub fn move_surface(surface_id: u32, x: i32, y: i32) -> Result<(), i64> {
 
 /// Marca a superfície como visível/oculta. Só o dono pode fazê-lo.
 pub fn present(surface_id: u32, shown: bool) -> Result<(), i64> {
-    let surfaces = surfaces();
+    let mut surfaces = surfaces_lock();
     let Some(slot) = find(surface_id) else {
         return Err(ENOENT);
     };
@@ -262,7 +267,7 @@ pub fn present(surface_id: u32, shown: bool) -> Result<(), i64> {
 
 /// Publica um frame: coloca o id na fila de sujos para o servidor copiar.
 pub fn flush(surface_id: u32) -> Result<(), i64> {
-    let surfaces = surfaces();
+    let mut surfaces = surfaces_lock();
     let Some(slot) = find(surface_id) else {
         return Err(ENOENT);
     };
@@ -277,7 +282,7 @@ pub fn flush(surface_id: u32) -> Result<(), i64> {
 /// Remove a superfície e desmapeia o buffer no espaço do dono. O buffer
 /// físico não é devolvido: o frame allocator é monotônico (sem reclaim).
 pub fn destroy(surface_id: u32) -> Result<(), i64> {
-    let surfaces = surfaces();
+    let mut surfaces = surfaces_lock();
     let Some(slot) = find(surface_id) else {
         return Err(ENOENT);
     };
@@ -291,7 +296,7 @@ pub fn destroy(surface_id: u32) -> Result<(), i64> {
 
 /// Remove as superfícies de um processo que está terminando.
 pub fn release_pid(pid: usize) {
-    let surfaces = surfaces();
+    let mut surfaces = surfaces_lock();
     for slot in 0..MAX_SURFACES {
         if surfaces.slots[slot].pid == pid {
             surfaces.slots[slot] = Surface::EMPTY;
@@ -301,19 +306,20 @@ pub fn release_pid(pid: usize) {
 }
 
 fn dirty(surface_id: u32) {
-    let surfaces = surfaces();
+    let mut surfaces = surfaces_lock();
     if surfaces.dirty_length == MAX_SURFACES {
         // Já cheia: uma chamada extra de flush é inofensiva.
         return;
     }
-    surfaces.dirty[surfaces.dirty_tail] = surface_id;
-    surfaces.dirty_tail = (surfaces.dirty_tail + 1) % MAX_SURFACES;
+    let tail = surfaces.dirty_tail;
+    surfaces.dirty[tail] = surface_id;
+    surfaces.dirty_tail = (tail + 1) % MAX_SURFACES;
     surfaces.dirty_length += 1;
 }
 
 /// Fila de sujos do servidor: retira o próximo id com frame novo.
 pub fn take_dirty() -> Option<u32> {
-    let surfaces = surfaces();
+    let mut surfaces = surfaces_lock();
     if surfaces.dirty_length == 0 {
         return None;
     }
@@ -330,7 +336,7 @@ pub type Snapshot = crate::abi::SurfaceSnapshot;
 /// Lista as superfícies visíveis e mapeia os buffers no processo atual (o
 /// servidor de display). Devolve a quantidade preenchida.
 pub fn snapshot_mapped(output: &mut [Snapshot]) -> usize {
-    let surfaces = surfaces();
+    let mut surfaces = surfaces_lock();
     let mut count = 0;
     for (slot, surface) in surfaces.slots.iter().enumerate() {
         if surface.physical == 0 || !surface.shown || count >= output.len() {
@@ -370,7 +376,8 @@ pub fn snapshot_mapped(output: &mut [Snapshot]) -> usize {
 
 /// Registra o PID do servidor de display (o que assumiu a tela).
 pub fn set_server() {
-    surfaces().server_pid = crate::process::current_pid();
+    let mut surfaces = surfaces_lock();
+    surfaces.server_pid = crate::process::current_pid();
 }
 
 /// Ponto de entrada dos eventos: o servidor entrega, os clientes leem.
@@ -382,7 +389,7 @@ pub fn set_server() {
 /// por superfície).
 #[allow(dead_code)]
 pub fn push_event_for(pid: usize, event: SurfaceEvent) {
-    let surfaces = surfaces();
+    let mut surfaces = surfaces_lock();
     let _ = surfaces.events[pid % imagineas_max()].push(event);
 }
 
@@ -392,7 +399,7 @@ fn imagineas_max() -> usize {
 
 /// Entrega um evento ao dono da superfície indicada.
 pub fn push_event_to_surface(surface_id: u32, event: SurfaceEvent) -> bool {
-    let surfaces = surfaces();
+    let mut surfaces = surfaces_lock();
     let Some(slot) = find(surface_id) else {
         return false;
     };
@@ -417,7 +424,7 @@ pub fn notify_hidden(surface_id: u32) {
 
 /// Retira o próximo evento dirigido ao processo atual.
 pub fn pop_event() -> Option<SurfaceEvent> {
-    let surfaces = surfaces();
+    let mut surfaces = surfaces_lock();
     let pid = crate::process::current_pid();
     surfaces.events[pid % imagineas_max()].pop()
 }

@@ -18,6 +18,7 @@ use core::ptr;
 
 use limine::BaseRevision;
 use limine::memory_map::Entry;
+use limine::memory_map::EntryType;
 use limine::request::{
     FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, RsdpRequest, StackSizeRequest,
 };
@@ -67,6 +68,16 @@ static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(
 
 static EMPTY_RESERVED: [PhysicalRange; 1] = [PhysicalRange::EMPTY];
 
+/// Entradas de memory map para o boot direto (`direct_start`).
+/// Uma única região USABLE cobrindo a RAM acessível, para que o alocador de
+/// frames encontre regiões usáveis sem depender do Limine.
+#[unsafe(link_section = ".data")]
+static mut DIRECT_MEMORY_ENTRIES: [Entry; 1] = [Entry {
+    base: 0x100_000,      // 1 MiB, acima da página zero
+    length: 512 * 1024 * 1024, // 512 MiB
+    entry_type: EntryType::USABLE,
+}];
+
 /// Nome do módulo que o `limine.conf` do dzImage passa ao Limine.
 const DZIMAGE_MODULE: &[u8] = b"dzImage";
 
@@ -87,7 +98,9 @@ pub fn framebuffer_response() -> Option<&'static limine::response::FramebufferRe
 }
 
 unsafe fn out(port: u16, value: u8) {
-    asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
+    unsafe {
+        asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
+    }
 }
 
 /// HHDM offset padrão usado no boot direto. Em endereço baixo (identity-mapped)
@@ -210,6 +223,22 @@ pub fn direct_start() -> ! {
     let initramfs_end = unsafe { &_initramfs_end as *const u8 };
     let initramfs_size = initramfs_end as usize - initramfs_start as usize;
 
+    // Verificar integridade do dzImage também no boot direto.
+    let initramfs_bytes = unsafe { core::slice::from_raw_parts(initramfs_start, initramfs_size) };
+    if let Err(error) = crate::dzimage::verify(initramfs_bytes, crate::abi::ABI_VERSION) {
+        crate::serial_write(b"boot: direct_start dzImage verify FAILED: ");
+        match error {
+            crate::dzimage::UnpackError::InvalidHeader => crate::serial_write(b"InvalidHeader"),
+            crate::dzimage::UnpackError::InvalidSize => crate::serial_write(b"InvalidSize"),
+            crate::dzimage::UnpackError::ChecksumMismatch => crate::serial_write(b"ChecksumMismatch"),
+            crate::dzimage::UnpackError::AbiMismatch => crate::serial_write(b"AbiMismatch"),
+            crate::dzimage::UnpackError::MissingMember => crate::serial_write(b"MissingMember"),
+        }
+        crate::serial_write(b"\r\n");
+        crate::halt();
+    }
+    crate::serial_write(b"boot: direct_start dzImage verify OK\r\n");
+
     let reserved: &[PhysicalRange] = &EMPTY_RESERVED;
 
     let tsc_start = crate::time::read_tsc();
@@ -240,8 +269,8 @@ pub fn direct_start() -> ! {
     }
 
     let boot_info = BootInfo {
-        memory_entries: ptr::null(),
-        memory_entries_count: 0,
+        memory_entries: unsafe { core::ptr::addr_of!(DIRECT_MEMORY_ENTRIES) as *const Entry },
+        memory_entries_count: 1,
         framebuffer: ptr::null(),
         modules: &module_response as *const DirectModuleResponse as *const ModuleResponse,
         rsdp_address: 0,

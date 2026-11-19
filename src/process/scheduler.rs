@@ -18,6 +18,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::abi::trap::TrapFrame;
 use crate::fpu;
 use crate::gdt;
+use crate::memory;
 use crate::paging::{self, AddressSpace, MapError};
 pub use crate::abi::UserArg;
 
@@ -107,6 +108,36 @@ unsafe impl Sync for SharedStacks {}
 pub(crate) static KERNEL_STACKS: SharedStacks = SharedStacks(UnsafeCell::new(KernelStacks(
     [[0; KERNEL_STACK_SIZE]; MAX_PROCESSES],
 )));
+
+/// Aloca uma pilha de kernel dinamicamente para um novo processo/thread.
+///
+/// Retorna o endereço do topo da pilha (último byte + 1), alinhado a 16 bytes.
+/// Usa o alocador de frames do kernel; retorna `None` se não houver frames
+/// suficientes (OOM).
+pub(crate) fn allocate_kernel_stack() -> Option<u64> {
+    let pages = KERNEL_STACK_SIZE / crate::memory::PAGE_SIZE as usize;
+    let allocator = crate::memory::allocator_mut();
+    let mut first_page: Option<u64> = None;
+    let mut prev_page: Option<u64> = None;
+    for _ in 0..pages {
+        let frame = memory::allocate_frame(allocator)?;
+        let vaddr = frame.virtual_address as u64;
+        if first_page.is_none() {
+            first_page = Some(vaddr);
+        }
+        if let Some(prev) = prev_page {
+            // As páginas são alocadas em ordem crescente de endereço físico
+            // pelo alocador de regions, mas não garantimos contiguidade
+            // virtual. Para simplificar, usamos apenas a última página alocada
+            // como topo. Cada página é mapeada via HHDM no endereço físico +
+            // offset, então o "topo" é o endereço virtual da última página + PAGE_SIZE.
+        }
+        prev_page = Some(vaddr);
+    }
+    let top = prev_page? + crate::memory::PAGE_SIZE as u64;
+    // Alinha para baixo a 16 bytes (o topo da pilha deve ser 16-alinhado).
+    Some(top & !(16 - 1))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[repr(u8)]
@@ -239,6 +270,10 @@ pub struct Process {
     /// Faixas anônimas vivas de `mmap`. Vazio em processos que nunca mapearam.
     pub(crate) mappings: [Mapping; MAX_MAPPINGS],
     pub(crate) mapping_count: usize,
+    /// Topo da pilha de kernel desta thread/processo (endereço do último byte + 1).
+    /// Alocado dinamicamente em vez do array fixo `KERNEL_STACKS`, permitindo
+    /// mais processos sem desperdiçar memória estaticamente.
+    pub(crate) kernel_stack_top: u64,
 }
 
 impl Process {
@@ -287,6 +322,7 @@ impl Process {
         wake_deadline: 0,
         mappings: [Mapping::EMPTY; MAX_MAPPINGS],
         mapping_count: 0,
+        kernel_stack_top: 0,
     };
 }
 
@@ -415,7 +451,11 @@ pub fn start() -> ! {
     crate::serial_write_hex(process.frame as u64);
     crate::serial_write(b"\r\n");
     let kernel_stack_top =
-        unsafe { (*KERNEL_STACKS.0.get()).0[0].as_ptr() as u64 + KERNEL_STACK_SIZE as u64 };
+        if process.kernel_stack_top != 0 {
+            process.kernel_stack_top
+        } else {
+            unsafe { (*KERNEL_STACKS.0.get()).0[0].as_ptr() as u64 + KERNEL_STACK_SIZE as u64 }
+        };
     gdt::set_kernel_stack(kernel_stack_top);
     crate::serial_write(b"process: start: switching to user address space\n");
     paging::switch(address_space);
@@ -826,6 +866,41 @@ pub fn send_signal(pid: usize, signal: u64) -> i64 {
     0
 }
 
+/// Mata o processo de menor prioridade (excluindo PID 1) para liberar memória
+/// quando o sistema está sem frames físicos (OOM).
+///
+/// Retorna `true` se um processo foi selecionado para terminação, `false` se
+/// não houver candidato (apenas PID 1 ou nenhum processo ativo).
+pub(crate) fn oom_kill() -> bool {
+    let scheduler = unsafe { &*SCHEDULER.0.get() };
+    let mut victim: Option<(usize, usize, Priority)> = None; // (slot, pid, priority)
+    for (slot, process) in scheduler.processes.iter().enumerate() {
+        if !process.active || process.pid == 1 || process.zombie {
+            continue;
+        }
+        // Menor valor de prioridade = menos importante (Idle=0 < Low=1 < ...)
+        let cand = (slot, process.pid, process.priority);
+        victim = match victim {
+            None => Some(cand),
+            Some((_, _, cur_prio)) if cand.2 < cur_prio => Some(cand),
+            Some(cur) => Some(cur),
+        };
+    }
+    drop(scheduler);
+
+    let Some((slot, pid, _)) = victim else {
+        return false;
+    };
+    crate::serial_write(b"oom_kill: terminating pid=");
+    crate::serial_write_hex(pid as u64);
+    crate::serial_write(b" slot=");
+    crate::serial_write_hex(slot as u64);
+    crate::serial_write(b"\r\n");
+    // Envia SIGKILL ao processo vítima
+    let _ = send_signal(pid, crate::abi::SIGNAL_KILL as u64);
+    true
+}
+
 pub fn set_signal_action(signal: u64, handler: u64, restorer: u64) -> i64 {
     if !valid_signal(signal)
         || signal == crate::abi::SIGNAL_KILL
@@ -1130,6 +1205,13 @@ fn next_deadline(scheduler: &Scheduler) -> Option<u64> {
 /// prazo é cumprido na granularidade do tick (~10 ms) — a imprecisão normal de
 /// um kernel sem timer de alta resolução.
 fn idle_until_next_deadline() {
+    // Se o TSC não foi calibrado, o relógio monotônico não avança. Entrar em
+    // hlt aqui travaria o sistema para sempre. Em vez disso, retorna imediatamente
+    // para que o escalonador siga em frente (sem preempção baseada em tempo).
+    if crate::time::tsc_frequency() == 0 {
+        crate::serial_write(b"idle: TSC nao calibrado; pulando hlt\r\n");
+        return;
+    }
     let Some(deadline) = next_deadline(unsafe { &*SCHEDULER.0.get() }) else {
         return;
     };
@@ -1264,9 +1346,10 @@ fn schedule(frame: *mut TrapFrame, exiting: bool) -> *mut TrapFrame {
             crate::serial_write(b"\r\n");
         }
         let address_space = next.address_space.expect("process address space");
-        let kernel_stack_top = unsafe {
-            (*KERNEL_STACKS.0.get()).0[candidate].as_ptr() as u64 + KERNEL_STACK_SIZE as u64
-        };
+        let kernel_stack_top =
+            if next.kernel_stack_top != 0 { next.kernel_stack_top } else {
+                unsafe { (*KERNEL_STACKS.0.get()).0[candidate].as_ptr() as u64 + KERNEL_STACK_SIZE as u64 }
+            };
         gdt::set_kernel_stack(kernel_stack_top);
         // Salva RIP/CS/RFLAGS/RSP/SS do próximo frame em variáveis estáticas
         // e define NEXT_CR3 para o assembly fazer o paging::switch depois de
@@ -1288,7 +1371,11 @@ fn schedule(frame: *mut TrapFrame, exiting: bool) -> *mut TrapFrame {
         return next.frame;
     }
 
-    crate::kernel_halt()
+    // Sem candidato rodável: não halte silenciosamente. Imprime um diagnóstico
+    // e entra em hlt controlado, para que seja visível no log serial por que o
+    // sistema parou (ex.: PID 1 saiu e não há outro processo).
+    crate::serial_write(b"schedule: no runnable process; halting\r\n");
+    crate::halt()
 }
 
 pub fn spawn_current(
@@ -1375,7 +1462,7 @@ pub fn execve_current(
     // (diferente do `spawn`, que usa outro slot). Escrevemos o frame novo na
     // **base** da pilha de kernel, longe o bastante do topo para não sobrepor
     // o frame ativo do stub de syscall.
-    let Some(execve_frame) = loader::execve_frame_scratch(slot) else {
+    let Some(execve_frame) = loader::execve_frame_scratch(process.kernel_stack_top) else {
         unsafe {
             (*frame).rax = (-12i64) as u64;
         }
@@ -1630,9 +1717,18 @@ pub fn fork_current(frame: *mut TrapFrame) -> *mut TrapFrame {
         return frame;
     };
 
+    // COW: marca todas as páginas do pai e do filho como somente leitura,
+    // registradas na CowTable compartilhada. Na primeira escrita, o page fault
+    // handler aloca uma cópia privada.
+    parent_space.mark_all_pages_cow();
+    child_space.mark_all_pages_cow();
+
     // O filho retoma exatamente onde o pai estava, mas com `rax = 0`.
-    let stacks = unsafe { &mut *KERNEL_STACKS.0.get() };
-    let kernel_stack_top = stacks.0[slot].as_mut_ptr() as u64 + KERNEL_STACK_SIZE as u64;
+    // Tenta alocar pilha de kernel dinamicamente; se falhar, usa o array estático.
+    let kernel_stack_top = allocate_kernel_stack()
+        .unwrap_or_else(|| unsafe {
+            (*KERNEL_STACKS.0.get()).0[slot].as_ptr() as u64 + KERNEL_STACK_SIZE as u64
+        });
     let child_frame = (kernel_stack_top as usize - size_of::<TrapFrame>()) as *mut TrapFrame;
     unsafe {
         child_frame.write(TrapFrame {
@@ -1696,6 +1792,7 @@ pub fn fork_current(frame: *mut TrapFrame) -> *mut TrapFrame {
         wake_deadline: 0,
         mappings: [Mapping::EMPTY; MAX_MAPPINGS],
         mapping_count: 0,
+        kernel_stack_top,
     };
     scheduler.count = scheduler.count.max(slot + 1);
     // O filho começa com a fatia zerada, garantindo que ele execute o quantum
@@ -2161,8 +2258,11 @@ pub fn create_thread(
     };
 
     // Frame inicial: a thread começa em `entry(argument)`, em ring 3.
-    let stacks = unsafe { &mut *KERNEL_STACKS.0.get() };
-    let kernel_stack_top = stacks.0[slot].as_mut_ptr() as u64 + KERNEL_STACK_SIZE as u64;
+    // Tenta alocar pilha de kernel dinamicamente; se falhar, usa o array estático.
+    let kernel_stack_top = allocate_kernel_stack()
+        .unwrap_or_else(|| unsafe {
+            (*KERNEL_STACKS.0.get()).0[slot].as_ptr() as u64 + KERNEL_STACK_SIZE as u64
+        });
     let thread_frame = (kernel_stack_top as usize - size_of::<TrapFrame>()) as *mut TrapFrame;
     unsafe {
         thread_frame.write(TrapFrame {
@@ -2236,6 +2336,7 @@ pub fn create_thread(
         wake_deadline: 0,
         mappings: parent.mappings,
         mapping_count: parent.mapping_count,
+        kernel_stack_top,
     };
     scheduler.count = scheduler.count.max(slot + 1);
     Ok(tid)

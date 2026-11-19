@@ -1,6 +1,10 @@
 use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
 use core::mem::size_of;
+use core::ptr::{self, null_mut};
+
+use crate::memory;
+use crate::paging;
 
 global_asm!(
     r#"
@@ -358,17 +362,17 @@ static mut NEXT_FRAME_VALID: bool = false;
 /// Funções de acesso para ler os valores salvos do próximo frame.
 /// Chamadas pelo assembly do syscall stub antes do iretq.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dreamcore_next_rip() -> u64 { NEXT_FRAME_RIP }
+pub unsafe extern "C" fn dreamcore_next_rip() -> u64 { unsafe { NEXT_FRAME_RIP } }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dreamcore_next_cs() -> u64 { NEXT_FRAME_CS }
+pub unsafe extern "C" fn dreamcore_next_cs() -> u64 { unsafe { NEXT_FRAME_CS } }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dreamcore_next_rflags() -> u64 { NEXT_FRAME_RFLAGS }
+pub unsafe extern "C" fn dreamcore_next_rflags() -> u64 { unsafe { NEXT_FRAME_RFLAGS } }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dreamcore_next_rsp() -> u64 { NEXT_FRAME_RSP }
+pub unsafe extern "C" fn dreamcore_next_rsp() -> u64 { unsafe { NEXT_FRAME_RSP } }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dreamcore_next_ss() -> u64 { NEXT_FRAME_SS }
+pub unsafe extern "C" fn dreamcore_next_ss() -> u64 { unsafe { NEXT_FRAME_SS } }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dreamcore_next_valid() -> u8 { if NEXT_FRAME_VALID { 1 } else { 0 } }
+pub unsafe extern "C" fn dreamcore_next_valid() -> u8 { unsafe { if NEXT_FRAME_VALID { 1 } else { 0 } } }
 
 /// Carrega todos os valores do próximo frame em um bloco de 5 u64 (RIP, CS,
 /// RFLAGS, RSP, SS) apontado por `dst`. Chamada pelo assembly antes do iretq.
@@ -395,11 +399,13 @@ pub(crate) static mut NEXT_CR3_VALID_PUB: bool = false;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dreamcore_get_next_cr3() -> u64 {
-    if NEXT_CR3_VALID_PUB {
-        NEXT_CR3_VALID_PUB = false;
-        NEXT_CR3_PUB
-    } else {
-        0
+    unsafe {
+        if NEXT_CR3_VALID_PUB {
+            NEXT_CR3_VALID_PUB = false;
+            NEXT_CR3_PUB
+        } else {
+            0
+        }
     }
 }
 
@@ -464,42 +470,56 @@ extern "C" fn dreamcore_exception_handler(
             }
         }
 
-        // Se um acesso de instrução (I/D=1) ocorre em um endereço abaixo de
-        // 0x400000 (não mapeado no userspace), provavelmente é uma syscall
-        // (`int 0x80` ou `syscall`, 2 bytes) cujo endereço de retorno não pôde
-        // ser restaurado corretamente. Pula a instrução (2 bytes) e retoma a
-        // execução, permitindo que o processo continue após a syscall falha.
-        if vector == 14 && error & 0b1_0000 != 0 && cr2 < 0x400000 {
-            crate::serial_write(b"user pf: skipping faulting instruction at cr2=0x");
-            crate::serial_write_hex(cr2);
-            crate::serial_write(b"\r\n");
-            if !frame.is_null() {
-                unsafe {
-                    (*frame).rip = cr2 + 2;
+        // COW: escrita em página marcada como Copy-on-Write (somente leitura
+        // na PTE, registrada na CowTable). Aloca uma cópia privada, mapeia
+        // como gravável e retoma a instrução.
+        if vector == 14
+            && error & 0b010 != 0
+            && cs & 3 == 3
+            && frame != null_mut()
+        {
+            let page = cr2 & !(crate::memory::PAGE_SIZE - 1);
+            let cow_handled = crate::process::with_current_space(|space| {
+                let cow_table = unsafe { space.cow_table.as_mut() };
+                if let Some(ct) = cow_table {
+                    if ct.contains(page) {
+                        // Aloca nova página e copia o conteúdo da original.
+                        let allocator = unsafe { &mut *space.allocator };
+                        let Some(new_frame) = memory::allocate_frame(allocator) else {
+                            return false;
+                        };
+                        let old_virt = memory::phys_to_virt(allocator, page)
+                            .unwrap_or(core::ptr::null_mut());
+                        if old_virt.is_null() {
+                            return false;
+                        }
+                        unsafe {
+                            core::ptr::write_bytes(new_frame.virtual_address, 0, crate::memory::PAGE_SIZE as usize);
+                            core::ptr::copy_nonoverlapping(old_virt, new_frame.virtual_address, crate::memory::PAGE_SIZE as usize);
+                        }
+                        // Remove da CowTable e mapeia como gravável.
+                        ct.remove(page);
+                        let _ = crate::process::with_current_space(|s| {
+                            s.map_user_page_writable(page).is_ok()
+                        });
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
                 }
-            }
-            unsafe {
-                dreamcore_resume_trap_frame(frame);
+            });
+            if cow_handled {
+                unsafe {
+                    dreamcore_resume_trap_frame(frame);
+                }
             }
         }
 
-        // GP fault em userspace (ex: instrução `out`/`in` de porta I/O não
-        // permitida em ring 3). Pula a instrução (geralmente 2 bytes) e
-        // continua, permitindo que o processo sobreviga a acessos de porta
-        // que o kernel ainda não emula.
-        if vector == 13 {
-            crate::serial_write(b"user gp: skipping faulting instruction at rip=0x");
-            crate::serial_write_hex(rip);
-            crate::serial_write(b"\r\n");
-            if !frame.is_null() {
-                unsafe {
-                    (*frame).rip = rip + 2;
-                }
-            }
-            unsafe {
-                dreamcore_resume_trap_frame(frame);
-            }
-        }
+        // Exceções em userspace nunca pulam instruções nem retomam a execução
+        // após uma falha de instrução ou de proteção geral. O processo é
+        // terminado com sinal apropriado pelo fluxo abaixo.
 
         crate::serial_log_timestamp();
         serial_write(b"User process fault; terminating PID ");
@@ -693,7 +713,7 @@ extern "C" fn dreamcore_gp_handler(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dreamcore_save_next_frame(frame: *mut crate::abi::trap::TrapFrame) {
     if frame.is_null() {
-        NEXT_FRAME_VALID = false;
+        unsafe { NEXT_FRAME_VALID = false; }
         return;
     }
     unsafe {
@@ -705,11 +725,11 @@ pub unsafe extern "C" fn dreamcore_save_next_frame(frame: *mut crate::abi::trap:
         NEXT_FRAME_VALID = true;
     }
     serial_write(b"save_next_frame: rip=0x");
-    crate::serial_write_hex(NEXT_FRAME_RIP);
+    unsafe { crate::serial_write_hex(NEXT_FRAME_RIP); }
     serial_write(b" cs=0x");
-    crate::serial_write_hex(NEXT_FRAME_CS);
+    unsafe { crate::serial_write_hex(NEXT_FRAME_CS); }
     serial_write(b" rsp=0x");
-    crate::serial_write_hex(NEXT_FRAME_RSP);
+    unsafe { crate::serial_write_hex(NEXT_FRAME_RSP); }
     serial_write(b"\r\n");
 }
 
@@ -718,16 +738,16 @@ pub unsafe extern "C" fn dreamcore_save_next_frame(frame: *mut crate::abi::trap:
 /// stub antes do `iretq`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dreamcore_restore_next_frame(frame: *mut crate::abi::trap::TrapFrame) {
-    if frame.is_null() || !NEXT_FRAME_VALID {
+    if frame.is_null() || unsafe { !NEXT_FRAME_VALID } {
         serial_write(b"restore_next_frame: INVALID or null\r\n");
         return;
     }
     serial_write(b"restore_next_frame: rip=0x");
-    crate::serial_write_hex(NEXT_FRAME_RIP);
+    unsafe { crate::serial_write_hex(NEXT_FRAME_RIP); }
     serial_write(b" cs=0x");
-    crate::serial_write_hex(NEXT_FRAME_CS);
+    unsafe { crate::serial_write_hex(NEXT_FRAME_CS); }
     serial_write(b" rsp=0x");
-    crate::serial_write_hex(NEXT_FRAME_RSP);
+    unsafe { crate::serial_write_hex(NEXT_FRAME_RSP); }
     serial_write(b"\r\n");
     unsafe {
         (*frame).rip = NEXT_FRAME_RIP;
@@ -832,13 +852,15 @@ pub fn init() {
 unsafe fn rdmsr(msr: u32) -> u64 {
     let eax: u32;
     let edx: u32;
-    core::arch::asm!(
-        "rdmsr",
-        in("ecx") msr,
-        out("eax") eax,
-        out("edx") edx,
-        options(nostack)
-    );
+    unsafe {
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") msr,
+            out("eax") eax,
+            out("edx") edx,
+            options(nostack)
+        );
+    }
     ((edx as u64) << 32) | (eax as u64)
 }
 
@@ -912,6 +934,19 @@ pub fn configure_syscall_msrs() {
     crate::serial_write(b" SCE=");
     crate::serial_write(if efer & 1 != 0 { b"1" } else { b"0" });
     crate::serial_write(b"\r\n");
+
+    // Habilita SMEP (bit 20) e SMAP (bit 21) em CR4.
+    // SMEP impede o kernel de executar código em páginas de usuário.
+    // SMAP impede o kernel de acessar dados em páginas de usuário, exceto
+    // quando explícito com stac/clac. Isso reduz a superfície de ataques
+    // que confundem o kernel a acessar memória controlada por userspace.
+    unsafe {
+        let cr4: u64;
+        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        let cr4_new = cr4 | (1 << 20) | (1 << 21); // SMEP | SMAP
+        asm!("mov cr4, {}", in(reg) cr4_new, options(nomem, nostack, preserves_flags));
+    }
+    serial_write(b"step: CR4 SMEP/SMAP enabled\r\n");
 }
 
 fn serial_write(bytes: &[u8]) {
@@ -950,6 +985,8 @@ fn serial_hex(mut value: u64) {
 
 unsafe fn in_port(port: u16) -> u8 {
     let value: u8;
-    asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags));
+    unsafe {
+        asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags));
+    }
     value
 }

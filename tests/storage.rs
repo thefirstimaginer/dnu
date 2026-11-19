@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-#[path = "../src/block.rs"]
+#[path = "/home/adryan/Downloads/dnu/src/mm/block.rs"]
 mod block;
-#[path = "../src/gpt.rs"]
+#[path = "/home/adryan/Downloads/dnu/src/fs/gpt.rs"]
 mod gpt;
 
 use block::{BlockDevice, BlockError, SECTOR_SIZE};

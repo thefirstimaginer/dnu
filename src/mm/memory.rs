@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use limine::memory_map::{Entry, EntryType};
 
 pub const PAGE_SIZE: u64 = 4096;
-pub const MAX_REGIONS: usize = 4;
+pub const MAX_REGIONS: usize = 64;
 
 #[derive(Clone, Copy)]
 pub struct Region {
@@ -15,7 +15,7 @@ impl Region {
     const EMPTY: Self = Self { next: 0, end: 0 };
 }
 
-const MAX_FREE_FRAMES: usize = 4;
+const MAX_FREE_FRAMES: usize = 64;
 
 #[unsafe(link_section = ".data")]
 #[used]
@@ -155,6 +155,7 @@ pub fn allocate_frame(allocator: &mut FrameAllocator) -> Option<Frame> {
         allocator.free_count -= 1;
         let physical_address = allocator.free_frames[allocator.free_count];
         let virtual_address = physical_address.checked_add(allocator.hhdm_offset)? as *mut u8;
+        ALLOCATED_BYTES.fetch_add(PAGE_SIZE, Ordering::Relaxed);
         return Some(Frame {
             physical_address,
             virtual_address,
@@ -168,6 +169,7 @@ pub fn allocate_frame(allocator: &mut FrameAllocator) -> Option<Frame> {
             let physical_address = region.next;
             region.next = region.next.checked_add(PAGE_SIZE)?;
             let virtual_address = physical_address.checked_add(allocator.hhdm_offset)? as *mut u8;
+            ALLOCATED_BYTES.fetch_add(PAGE_SIZE, Ordering::Relaxed);
             crate::serial_write(b"step: allocate_frame returning frame\r\n");
             return Some(Frame {
                 physical_address,
@@ -189,6 +191,7 @@ pub fn free_frame(allocator: &mut FrameAllocator, physical_address: u64) -> bool
     }
     allocator.free_frames[allocator.free_count] = physical_address;
     allocator.free_count += 1;
+    ALLOCATED_BYTES.fetch_sub(PAGE_SIZE, Ordering::Relaxed);
     true
 }
 
@@ -196,6 +199,26 @@ pub fn phys_to_virt(allocator: &FrameAllocator, physical_address: u64) -> Option
     physical_address
         .checked_add(allocator.hhdm_offset)
         .map(|virtual_address| virtual_address as *mut u8)
+}
+
+/// Retorna uma referência mutável ao alocador global.
+///
+/// Usa `addr_of_mut!` + ponteiro bruto (em vez de referência direta a
+/// `static mut`), que é a forma aprovada pela edição 2024 para acessar
+/// estáticos mutáveis sem UB.
+pub(crate) fn allocator_mut() -> &'static mut FrameAllocator {
+    unsafe {
+        let ptr = core::ptr::addr_of_mut!(crate::ALLOCATOR);
+        &mut *ptr.cast::<FrameAllocator>()
+    }
+}
+
+/// Retorna uma referência compartilhada ao alocador global da mesma forma.
+pub(crate) fn allocator_ref() -> &'static FrameAllocator {
+    unsafe {
+        let ptr = core::ptr::addr_of!(crate::ALLOCATOR);
+        &*ptr.cast::<FrameAllocator>()
+    }
 }
 
 pub fn usage(allocator: &FrameAllocator) -> (u64, u64) {

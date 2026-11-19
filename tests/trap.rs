@@ -12,7 +12,7 @@
 // `drivers/time.rs` importa `crate::abi::trap`; o alias abaixo satisfaz esse
 // caminho para que o mapa de vetores e a matemática do relógio sejam testáveis
 // no host, sem bootar.
-#[path = "../src/abi_trap.rs"]
+#[path = "/home/adryan/Downloads/dnu/src/abi/abi_trap.rs"]
 pub mod trap_impl;
 
 pub mod abi {
@@ -22,7 +22,7 @@ pub mod abi {
 #[path = "time_math.rs"]
 pub mod time;
 
-#[path = "../src/time.rs"]
+#[path = "/home/adryan/Downloads/dnu/src/time/time.rs"]
 mod drivers_time;
 
 use std::mem::{offset_of, size_of};

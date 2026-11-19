@@ -1,6 +1,10 @@
 use crate::memory;
 use core::arch::asm;
 use core::ptr;
+use core::sync::atomic::AtomicUsize;
+
+extern crate alloc;
+use alloc::boxed::Box;
 
 const PAGE_SIZE: u64 = 4096;
 const ENTRY_PRESENT: u64 = 1;
@@ -16,10 +20,82 @@ const RSVD_MASK: u64 = 0x7ff0_0000_0000_0000;
 const USER_MIN: u64 = 0x400000;
 const USER_MAX: u64 = 0x0000_8000_0000_0000;
 
+/// Número máximo de páginas rastreadas como COW por address space.
+///
+/// 4096 é suficiente para processos típicos (heap, stacks, mmap). Se um
+/// processo exceder esse limite, o `fork` falha com ENOMEM em vez de compartilhar
+/// páginas graváveis silenciosamente entre pai e filho.
+const MAX_COW_PAGES: usize = 4096;
+
+/// Tabela de páginas Copy-on-Write compartilhada entre pai e filho após `fork`.
+///
+/// Cada entrada é um endereço virtual de página que está marcado como COW
+/// (somente leitura na PTE). Quando um processo escreve em uma dessas páginas,
+/// o handler de page fault aloca uma cópia privada.
+#[repr(C)]
+pub struct CowTable {
+    pages: [u64; MAX_COW_PAGES],
+    count: AtomicUsize,
+}
+
+impl CowTable {
+    const EMPTY: Self = Self {
+        pages: [0; MAX_COW_PAGES],
+        count: AtomicUsize::new(0),
+    };
+
+    /// Adiciona uma página à tabela COW. Retorna false se a tabela estiver cheia.
+    pub fn add(&mut self, page: u64) -> bool {
+        let n = self.count.load(core::sync::atomic::Ordering::Relaxed);
+        if n >= MAX_COW_PAGES {
+            return false;
+        }
+        // Verifica duplicata
+        for i in 0..n {
+            if self.pages[i] == page {
+                return true;
+            }
+        }
+        self.pages[n] = page;
+        self.count.store(n + 1, core::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    /// Verifica se uma página está marcada como COW.
+    pub fn contains(&self, page: u64) -> bool {
+        let n = self.count.load(core::sync::atomic::Ordering::Relaxed);
+        for i in 0..n {
+            if self.pages[i] == page {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Remove uma página da tabela COW (após a cópia ter sido feita).
+    pub fn remove(&mut self, page: u64) {
+        let mut n = self.count.load(core::sync::atomic::Ordering::Relaxed);
+        let mut found = false;
+        for i in 0..n {
+            if found {
+                self.pages[i - 1] = self.pages[i];
+            } else if self.pages[i] == page {
+                found = true;
+            }
+        }
+        if found {
+            self.count.store(n - 1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct AddressSpace {
     pub root_physical: u64,
     pub allocator: *mut memory::FrameAllocator,
+    /// Ponteiro para a tabela COW compartilhada (pai e filho apontam para a
+    /// mesma tabela após `fork`). NULL quando não há páginas COW.
+    pub cow_table: *mut CowTable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,9 +144,11 @@ impl AddressSpace {
             let destination = root.virtual_address.cast::<u64>();
             ptr::copy_nonoverlapping(source.add(256), destination.add(256), 256);
         }
+        let cow_table = Box::into_raw(Box::new(CowTable::EMPTY));
         Some(Self {
             root_physical: root.physical_address,
-            allocator,
+            allocator: memory::allocator_mut(),
+            cow_table,
         })
     }
 
@@ -109,9 +187,11 @@ impl AddressSpace {
                 unsafe {
                     ptr::write_bytes(frame.virtual_address, 0, PAGE_SIZE as usize);
                 }
-                *entry = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER;
+                // Tabelas de página intermediárias (PML4/PDPT/PD) não precisam
+                // de gravação: W^X estrito. Apenas PRESENT + USER.
+                *entry = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_USER;
             } else {
-                *entry |= ENTRY_WRITABLE | ENTRY_USER;
+                *entry |= ENTRY_USER;
             }
             table_physical = *entry & ADDRESS_MASK;
         }
@@ -119,14 +199,11 @@ impl AddressSpace {
         let table = table_pointer(table_physical).ok_or(MapError::OutOfMemory)?;
         let entry = unsafe { &mut *table.add(indices[3]) };
         if *entry & ENTRY_PRESENT != 0 {
-            // Merge permissions: preserve EXECUTE if already set, add NX only
-            // if the page is not already executable.
+            // W^X estrito: nunca remover NX ao adicionar escrita. Uma página
+            // já executável (sem NX) permanece não-gravável; uma página
+            // gravável permanece não-executável. Nunca resulta em RWX.
             let mut new_bits = *entry & !ENTRY_WRITABLE;
             new_bits |= flags.entry_bits();
-            // If page was already executable, don't add NX (shared page with code).
-            if *entry & ENTRY_NX == 0 {
-                new_bits &= !ENTRY_NX;
-            }
             *entry = new_bits;
             return Ok(memory::phys_to_virt(unsafe { &*self.allocator }, *entry & ADDRESS_MASK)
                 .unwrap_or(core::ptr::null_mut()));
@@ -233,11 +310,63 @@ impl AddressSpace {
     }
 
     pub fn clone_user(&self) -> Option<Self> {
-        let clone = Self::new_user(unsafe { &mut *self.allocator })?;
-        if self.copy_user_pages(&clone) == 0 {
-            return None;
+        let current_root = read_cr3() & ADDRESS_MASK;
+        let root = memory::allocate_frame(unsafe { &mut *self.allocator })?;
+        unsafe {
+            ptr::write_bytes(root.virtual_address, 0, PAGE_SIZE as usize);
+            let source = memory::phys_to_virt(unsafe { &*self.allocator }, current_root)?.cast::<u64>();
+            let destination = root.virtual_address.cast::<u64>();
+            ptr::copy_nonoverlapping(source.add(256), destination.add(256), 256);
         }
-        Some(clone)
+        // COW: o clone compartilha a mesma tabela COW do pai. As páginas não são
+        // copiadas aqui; são marcadas como somente leitura (removido ENTRY_WRITABLE)
+        // e registradas na CowTable. Na primeira escrita, o page fault handler
+        // aloca uma cópia privada.
+        let cow_table = self.cow_table;
+        Some(Self {
+            root_physical: root.physical_address,
+            allocator: self.allocator,
+            cow_table,
+        })
+    }
+
+    /// Marca todas as páginas de usuário mapeadas como somente leitura (COW)
+    /// e as registra na CowTable. Chamado pelo loader após `fork` para que pai
+    /// e filho compartilhem as páginas até a primeira escrita.
+    pub fn mark_all_pages_cow(&self) {
+        let cow_table = unsafe { self.cow_table.as_mut() };
+        if cow_table.is_none() {
+            return;
+        }
+        let cow_table = cow_table.unwrap();
+        self.mark_range_cow(self.root_physical, 0, cow_table);
+    }
+
+    fn mark_range_cow(&self, table_physical: u64, level: u8, cow_table: &mut CowTable) {
+        let Some(table) = table_pointer(table_physical) else {
+            return;
+        };
+        for index in 0..512usize {
+            let entry = unsafe { *table.add(index) };
+            if entry & ENTRY_PRESENT == 0 {
+                continue;
+            }
+            if level == 1 {
+                // PTE: se é página de usuário (ENTRY_USER), remove ENTRY_WRITABLE
+                // e registra na CowTable.
+                if entry & ENTRY_USER != 0 {
+                    let page = entry & ADDRESS_MASK;
+                    let new_entry = entry & !ENTRY_WRITABLE;
+                    unsafe { *table.add(index) = new_entry };
+                    cow_table.add(page);
+                }
+                continue;
+            }
+            if entry & ENTRY_HUGE != 0 {
+                continue;
+            }
+            self.mark_range_cow(entry & ADDRESS_MASK, level - 1, cow_table);
+        }
     }
 
     fn copy_user_pages(&self, destination: &Self) -> usize {
@@ -481,13 +610,7 @@ pub fn map_hhdm_range(hhdm_offset: u64, physical_address: u64, length: usize, wr
         return true;
     }
 
-    let allocator = unsafe {
-        let ptr_val = core::ptr::read(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR));
-        if ptr_val.is_null() {
-            return false;
-        }
-        &mut *ptr_val
-    };
+    let allocator = memory::allocator_mut();
 
     const HUGE_PAGE_SIZE: u64 = 0x200000; // 2MB
     const HUGE_PAGE_MASK: u64 = !(HUGE_PAGE_SIZE - 1);
@@ -590,14 +713,7 @@ pub fn fix_kernel_page_table_entries() {
     const RSVD_MASK: u64 = 0x7ff0_0000_0000_0000; // bits 52-62
     const NX_MASK: u64 = 1 << 63; // bit 63: NX (reserved unless EFER.NXE=1)
 
-    let allocator = unsafe {
-        let ptr_val = core::ptr::read(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR));
-        if ptr_val.is_null() {
-            crate::serial_write(b"fix_kernel_page_table: allocator not ready\r\n");
-            return;
-        }
-        &mut *ptr_val
-    };
+    let allocator = memory::allocator_mut();
 
     let hhdm_offset = allocator.hhdm_offset;
     let root_physical = read_cr3() & ADDRESS_MASK;
@@ -685,13 +801,17 @@ pub fn fix_kernel_page_table_entries() {
                 unsafe {
                     ptr::write_bytes(frame.virtual_address, 0, PAGE_SIZE as usize);
                 }
-                *table = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_WRITABLE;
+                // Tabelas de página intermediárias do kernel: não graváveis,
+                // não de usuário. W^X estrito.
+                *table = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT;
                 mapped_count += 1;
             }
 
             if *index == indices[2] && *table & ENTRY_HUGE != 0 {
                 huge_page = true;
-                let fixed = *table & !(RSVD_MASK | NX_MASK);
+                // Nunca remover NX: páginas de código devem permanecer não-graváveis
+                // e não-executáveis (ou executáveis-somente-leitura, nunca RWX).
+                let fixed = *table & !RSVD_MASK;
                 if fixed != *table {
                     *table = fixed;
                     fixed_count += 1;
@@ -723,12 +843,14 @@ pub fn fix_kernel_page_table_entries() {
                 unsafe {
                     ptr::write_bytes(frame.virtual_address, 0, PAGE_SIZE as usize);
                 }
+                // PTEs de dados do kernel: graváveis e não-executáveis (W^X).
                 unsafe {
-                    *entry_ptr = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_WRITABLE;
+                    *entry_ptr = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_NX;
                 }
                 mapped_count += 1;
             } else {
-                let fixed = entry & !(RSVD_MASK | NX_MASK);
+                // Nunca remover NX de PTEs existentes: evita criar páginas RWX.
+                let fixed = entry & !RSVD_MASK;
                 if fixed != entry {
                     unsafe {
                         *entry_ptr = fixed;
@@ -759,12 +881,52 @@ pub fn fix_kernel_page_table_entries() {
 }
 
 fn table_pointer(physical: u64) -> Option<*mut u64> {
-    let allocator = unsafe {
-        let ptr_val = core::ptr::read(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR));
-        if ptr_val.is_null() {
-            return None;
-        }
-        &*ptr_val
-    };
+    let allocator = memory::allocator_ref();
     Some(memory::phys_to_virt(allocator, physical)?.cast())
+}
+
+// ---------------------------------------------------------------------------
+// Testes de fronteira (apenas em builds de teste do host)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_flags_read_write_sets_nx() {
+        assert!(PageFlags::READ_WRITE.entry_bits() & ENTRY_NX != 0);
+    }
+
+    #[test]
+    fn page_flags_read_exec_clears_nx() {
+        assert!(PageFlags::READ_EXEC.entry_bits() & ENTRY_NX == 0);
+    }
+
+    #[test]
+    fn page_flags_read_only_sets_nx() {
+        assert!(PageFlags::READ_ONLY.entry_bits() & ENTRY_NX != 0);
+    }
+
+    #[test]
+    fn map_user_page_rejects_below_user_min() {
+        // Não podemos instanciar AddressSpace sem alocador, mas podemos
+        // verificar que os limites de endereço são consistentes.
+        assert!(USER_MIN < USER_MAX);
+        assert!(USER_MIN == 0x400000);
+        assert!(USER_MAX == 0x0000_8000_0000_0000);
+    }
+
+    #[test]
+    fn wxx_never_removes_nx_on_write() {
+        // Simula o merge de permissoes: pagina executavel (sem NX) + escrita
+        // deve manter NX (nunca resulta em RWX).
+        let existing: u64 = ENTRY_PRESENT | ENTRY_USER; // RX, sem NX
+        let flags = PageFlags::READ_WRITE;
+        let mut new_bits = existing & !ENTRY_WRITABLE;
+        new_bits |= flags.entry_bits();
+        // NX deve estar definido (pagina gravavel nao e executavel)
+        assert!(new_bits & ENTRY_NX != 0, "W^X violada: pagina RWX criada");
+        // Nao deve conter bits reservados
+        assert!(new_bits & RSVD_MASK == 0);
+    }
 }

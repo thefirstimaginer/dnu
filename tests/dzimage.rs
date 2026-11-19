@@ -9,7 +9,7 @@
 //! Execute com:
 //! `rustc --edition 2024 --test tests/dzimage.rs -o /tmp/dzimage-tests && /tmp/dzimage-tests`
 
-#[path = "../src/dzimage.rs"]
+#[path = "/home/adryan/Downloads/dnu/src/boot/dzimage.rs"]
 pub mod dzimage;
 
 /// Tamanho da entrada da tabela no formato (não exposto pelo módulo do kernel).

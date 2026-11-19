@@ -40,7 +40,9 @@ impl BlockHeader {
     }
 
     unsafe fn from_data_ptr(ptr: *mut u8) -> *mut BlockHeader {
-        (ptr as *mut u8).sub(size_of::<BlockHeader>()) as *mut BlockHeader
+        unsafe {
+            (ptr as *mut u8).sub(size_of::<BlockHeader>()) as *mut BlockHeader
+        }
     }
 
     fn data_size(&self) -> usize {
@@ -77,156 +79,134 @@ impl LinkedListAllocator {
     }
 
     pub unsafe fn init(&mut self, start: *mut u8, size: usize) {
-        let start = start as usize;
-        let end = start + size;
-
-        let align = core::mem::align_of::<BlockHeader>();
-        let start = (start + align - 1) & !(align - 1);
-        let end = end & !(align - 1);
-
-        if end <= start + size_of::<BlockHeader>() {
-            return;
-        }
-
-        let usable_size = end - start;
-        let header = BlockHeader::free(usable_size, None);
-        let header_ptr = start as *mut BlockHeader;
         unsafe {
-            core::ptr::write(header_ptr, header);
-        }
+            let start = start as usize;
+            let end = start + size;
 
-        *self.head.get() = Some(NonNull::new(header_ptr).unwrap());
-        *self.total_size.get() = usable_size;
+            let align = core::mem::align_of::<BlockHeader>();
+            let start = (start + align - 1) & !(align - 1);
+            let end = end & !(align - 1);
+
+            if end <= start + size_of::<BlockHeader>() {
+                return;
+            }
+
+            let usable_size = end - start;
+            let header = BlockHeader::free(usable_size, None);
+            let header_ptr = start as *mut BlockHeader;
+            core::ptr::write(header_ptr, header);
+
+            *self.head.get() = Some(NonNull::new(header_ptr).unwrap());
+            *self.total_size.get() = usable_size;
+        }
     }
 
     pub unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let size = BlockHeader::align_size(layout.size());
+        unsafe {
+            let size = BlockHeader::align_size(layout.size());
 
-        let mut prev: Option<NonNull<BlockHeader>> = None;
-        let mut curr = unsafe { *self.head.get() };
+            let mut prev: Option<NonNull<BlockHeader>> = None;
+            let mut curr = *self.head.get();
 
-        while let Some(node) = curr {
-            let node_ref = unsafe { node.as_ref() };
+            while let Some(node) = curr {
+                let node_ref = node.as_ref();
 
-            if node_ref.size >= size {
-                let remaining = node_ref.size - size;
-                if remaining >= size_of::<BlockHeader>() {
-                    let new_node_ptr = node.as_ptr().add(size) as *mut BlockHeader;
-                    unsafe {
+                if node_ref.size >= size {
+                    let remaining = node_ref.size - size;
+                    if remaining >= size_of::<BlockHeader>() {
+                        let new_node_ptr = node.as_ptr().add(size) as *mut BlockHeader;
                         core::ptr::write(
                             new_node_ptr,
                             BlockHeader::free(remaining, node_ref.next),
                         );
-                    }
 
-                    let mut header = node_ref.clone();
-                    header.size = size;
-                    header.next = None;
+                        let mut header = node_ref.clone();
+                        header.size = size;
+                        header.next = None;
 
-                    unsafe {
                         core::ptr::write(node.as_ptr(), header);
-                    }
 
-                    if let Some(mut prev_node) = prev {
-                        unsafe {
+                        if let Some(mut prev_node) = prev {
                             prev_node.as_mut().next = Some(NonNull::new(new_node_ptr).unwrap());
-                        }
-                    } else {
-                        unsafe {
+                        } else {
                             *self.head.get() = Some(NonNull::new(new_node_ptr).unwrap());
                         }
-                    }
 
-                    self.allocated_bytes.fetch_add(size, Ordering::Relaxed);
-                    return node_ref.data_ptr();
-                } else {
-                    if let Some(mut prev_node) = prev {
-                        unsafe {
-                            prev_node.as_mut().next = node_ref.next;
-                        }
+                        self.allocated_bytes.fetch_add(size, Ordering::Relaxed);
+                        return node_ref.data_ptr();
                     } else {
-                        unsafe {
+                        if let Some(mut prev_node) = prev {
+                            prev_node.as_mut().next = node_ref.next;
+                        } else {
                             *self.head.get() = node_ref.next;
                         }
-                    }
 
-                    self.allocated_bytes.fetch_add(node_ref.size, Ordering::Relaxed);
-                    return node_ref.data_ptr();
+                        self.allocated_bytes.fetch_add(node_ref.size, Ordering::Relaxed);
+                        return node_ref.data_ptr();
+                    }
                 }
+
+                prev = Some(node);
+                curr = node_ref.next;
             }
 
-            prev = Some(node);
-            curr = node_ref.next;
+            null_mut()
         }
-
-        null_mut()
     }
 
     pub unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if ptr.is_null() {
-            return;
-        }
-
-        let size = BlockHeader::align_size(layout.size());
-        let header_ptr = BlockHeader::from_data_ptr(ptr);
-
         unsafe {
-            core::ptr::write(header_ptr, BlockHeader::free(size, None));
-        }
-
-        let mut prev: Option<NonNull<BlockHeader>> = None;
-        let mut curr = unsafe { *self.head.get() };
-        let new_ptr = NonNull::new(header_ptr).unwrap();
-
-        while let Some(node) = curr {
-            if node.as_ptr() > header_ptr {
-                break;
+            if ptr.is_null() {
+                return;
             }
-            prev = Some(node);
-            curr = unsafe { node.as_ref().next };
-        }
 
-        if let Some(mut prev_node) = prev {
-            let prev_end = unsafe {
-                prev_node.as_ptr().add(prev_node.as_ref().size) as *mut u8
-            };
-            if prev_end == header_ptr as *mut u8 {
-                unsafe {
+            let size = BlockHeader::align_size(layout.size());
+            let header_ptr = BlockHeader::from_data_ptr(ptr);
+
+            core::ptr::write(header_ptr, BlockHeader::free(size, None));
+
+            let mut prev: Option<NonNull<BlockHeader>> = None;
+            let mut curr = *self.head.get();
+            let new_ptr = NonNull::new(header_ptr).unwrap();
+
+            while let Some(node) = curr {
+                if node.as_ptr() > header_ptr {
+                    break;
+                }
+                prev = Some(node);
+                curr = node.as_ref().next;
+            }
+
+            if let Some(mut prev_node) = prev {
+                let prev_end = prev_node.as_ptr().add(prev_node.as_ref().size) as *mut u8;
+                if prev_end == header_ptr as *mut u8 {
                     prev_node.as_mut().size += size;
                     prev_node.as_mut().next = (*header_ptr).next;
+                    self.allocated_bytes.fetch_sub(size, Ordering::Relaxed);
+                    return;
                 }
-                self.allocated_bytes.fetch_sub(size, Ordering::Relaxed);
-                return;
             }
-        }
 
-        if let Some(next_node) = curr {
-            let new_end = header_ptr as *mut u8 as usize + size;
-            let next_start = next_node.as_ptr() as *mut u8;
-            if new_end == next_start as usize {
-                unsafe {
+            if let Some(next_node) = curr {
+                let new_end = header_ptr as *mut u8 as usize + size;
+                let next_start = next_node.as_ptr() as *mut u8;
+                if new_end == next_start as usize {
                     (*header_ptr).size += next_node.as_ref().size;
                     (*header_ptr).next = next_node.as_ref().next;
+                    self.allocated_bytes.fetch_sub(size, Ordering::Relaxed);
+                    return;
                 }
-                self.allocated_bytes.fetch_sub(size, Ordering::Relaxed);
-                return;
             }
-        }
 
-        unsafe {
             (*header_ptr).next = curr;
-        }
-        if let Some(mut prev_node) = prev {
-            unsafe {
+            if let Some(mut prev_node) = prev {
                 prev_node.as_mut().next = Some(new_ptr);
-            }
-        } else {
-            unsafe {
+            } else {
                 *self.head.get() = Some(new_ptr);
             }
-        }
 
-        self.allocated_bytes.fetch_sub(size, Ordering::Relaxed);
+            self.allocated_bytes.fetch_sub(size, Ordering::Relaxed);
+        }
     }
 
     pub fn allocated_bytes(&self) -> usize {
@@ -291,50 +271,52 @@ pub unsafe fn allocator_init() {
 
 unsafe impl GlobalAlloc for LinkedListAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        self.alloc(layout)
+        unsafe { self.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.dealloc(ptr, layout);
+        unsafe { self.dealloc(ptr, layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let ptr = self.alloc(layout);
-        if !ptr.is_null() {
-            core::ptr::write_bytes(ptr, 0, layout.size());
+        unsafe {
+            let ptr = self.alloc(layout);
+            if !ptr.is_null() {
+                core::ptr::write_bytes(ptr, 0, layout.size());
+            }
+            ptr
         }
-        ptr
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if ptr.is_null() {
-            return self.alloc(layout);
-        }
-        if new_size == 0 {
-            self.dealloc(ptr, layout);
-            return null_mut();
-        }
-
-        let header_ptr = BlockHeader::from_data_ptr(ptr);
-        let old_header = unsafe { core::ptr::read(header_ptr) };
-        let old_size = old_header.data_size();
-
-        if new_size <= old_size {
-            return ptr;
-        }
-
-        let new_layout = Layout::from_size_align(new_size, layout.align())
-            .expect("layout inválido");
-        let new_ptr = self.alloc(new_layout);
-        if new_ptr.is_null() {
-            return null_mut();
-        }
-
         unsafe {
+            if ptr.is_null() {
+                return self.alloc(layout);
+            }
+            if new_size == 0 {
+                self.dealloc(ptr, layout);
+                return null_mut();
+            }
+
+            let header_ptr = BlockHeader::from_data_ptr(ptr);
+            let old_header = core::ptr::read(header_ptr);
+            let old_size = old_header.data_size();
+
+            if new_size <= old_size {
+                return ptr;
+            }
+
+            let new_layout = Layout::from_size_align(new_size, layout.align())
+                .expect("layout inválido");
+            let new_ptr = self.alloc(new_layout);
+            if new_ptr.is_null() {
+                return null_mut();
+            }
+
             core::ptr::copy_nonoverlapping(ptr, new_ptr, old_size);
             self.dealloc(ptr, layout);
+            new_ptr
         }
-        new_ptr
     }
 }
 

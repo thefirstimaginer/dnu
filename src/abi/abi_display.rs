@@ -253,10 +253,21 @@ pub fn surface_snapshot(frame: &mut TrapFrame) -> *mut TrapFrame {
 }
 
 /// `surface_send_event(&SurfaceEvent)`: entrega um evento ao dono.
+///
+/// Somente o dono da superfície pode enviar eventos para ela, impedindo que
+/// um processo malicioso injete eventos na fila de outro cliente.
 pub fn surface_send_event(frame: &mut TrapFrame) -> *mut TrapFrame {
     let mut event = SurfaceEvent::default();
     if !copy_struct_from_user(frame.rdi, &mut event) {
         return frame.fail(EFAULT);
+    }
+    let pid = crate::process::current_pid();
+    if let Some(owner) = crate::surface::owner(event.surface) {
+        if owner != pid {
+            return frame.fail(EINVAL);
+        }
+    } else {
+        return frame.fail(ENOENT);
     }
     if crate::surface::push_event_to_surface(event.surface, event) {
         frame.ok(0)
