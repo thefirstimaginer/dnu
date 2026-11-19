@@ -18,6 +18,12 @@ const ENTRY_SIZE: usize = 24;
 pub const KIND_KERNEL: u32 = 1;
 pub const KIND_INITRAMFS: u32 = 2;
 
+/// Flags do cabeçalho dzImage (offset 28-31).
+pub const FLAG_SIGNED: u32 = 1 << 0;
+
+/// Tamanho da assinatura ed25519, armazenada após a tabela de membros.
+pub const SIGNATURE_SIZE: usize = 64;
+
 /// Maior payload aceito (initramfs em USTAR não comprimido).
 pub const MAX_MEMBER_SIZE: usize = 1024 * 1024 * 1024;
 const MAX_MEMBERS: usize = 64;
@@ -108,6 +114,12 @@ pub fn align8(value: usize) -> usize {
 }
 
 /// Valida o cabeçalho, a tabela e o CRC-32 de uma imagem em memória.
+///
+/// Se o bit `FLAG_SIGNED` estiver definido nos flags do cabeçalho (offset 28),
+/// também verifica que existe uma assinatura de 64 bytes após a tabela de
+/// membros. A validação criptográfica da assinatura em si (ed25519) é um
+/// placeholder: atualmente apenas confirma a presença da assinatura. Substituir
+/// por uma verificação real com uma crate de criptografia antes de produção.
 pub fn verify(image: &[u8], expected_abi: u64) -> Result<(), String> {
     if image.len() < HEADER_SIZE {
         return Err(String::from("truncated dzImage"));
@@ -136,6 +148,24 @@ pub fn verify(image: &[u8], expected_abi: u64) -> Result<(), String> {
     if image.len() < table_end {
         return Err(String::from("truncated member table"));
     }
+
+    // Lê os flags do cabeçalho (offset 28-31).
+    let flags = get_u32(image, 28).ok_or_else(|| String::from("truncated header"))?;
+    let signed = flags & FLAG_SIGNED != 0;
+
+    // Se a imagem declara estar assinada, verifica presença da assinatura
+    // (64 bytes) imediatamente após a tabela de membros.
+    if signed {
+        let sig_end = table_end
+            .checked_add(SIGNATURE_SIZE)
+            .ok_or_else(|| String::from("overflow"))?;
+        if image.len() < sig_end {
+            return Err(String::from("signed dzImage missing signature"));
+        }
+        // TODO: validar a assinatura ed25519 com DZIMAGE_PUBLIC_KEY.
+        // Por enquanto, apenas confirma a presença dos 64 bytes.
+    }
+
     let expected = get_u32(image, 24).ok_or_else(|| String::from("truncated header"))?;
     let mut checksum = !0u32;
     for (i, &byte) in image.iter().enumerate() {

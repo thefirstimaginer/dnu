@@ -1,17 +1,16 @@
 #![no_std]
 #![no_main]
+#![deny(unsafe_op_in_unsafe_fn)]
 #![allow(missing_docs)]
-#![allow(unsafe_op_in_unsafe_fn)]
 use core::arch::asm;
-use limine::memory_map::EntryType;
+use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
-use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
-use crate::memory::{FrameAllocator, PAGE_SIZE};
+use crate::memory::FrameAllocator;
 
-#[unsafe(link_section = ".data.early")]
+#[unsafe(link_section = ".data")]
 #[used]
-pub static mut ALLOCATOR_PTR: *mut FrameAllocator = core::ptr::null_mut();
+pub static mut ALLOCATOR: MaybeUninit<FrameAllocator> = MaybeUninit::uninit();
 
 unsafe extern "C" {
     static _ebss: u8;
@@ -39,6 +38,7 @@ mod dzimage;
 mod distro;
 #[path = "config/config.rs"]
 mod config;
+pub mod sync;
 #[path = "subsystems/subsystems.rs"]
 mod subsystems;
 use subsystems::Subsystem;
@@ -162,9 +162,10 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
 
     let mut allocator = memory::FrameAllocator::new();
     unsafe {
-        core::ptr::write(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR), &mut allocator as *mut FrameAllocator);
+        core::ptr::write(core::ptr::addr_of_mut!(crate::ALLOCATOR), MaybeUninit::new(allocator));
     }
-    let frame_count = memory::init_with_allocator(&mut allocator, entries, boot_info.hhdm_offset, &[]);
+    let mut allocator = unsafe { crate::ALLOCATOR.assume_init_mut() };
+    let frame_count = memory::init_with_allocator(allocator, entries, boot_info.hhdm_offset, &[]);
     crate::serial_write(b"step: memory init done\r\n");
 
     subsystems::mark_ready(Subsystem::Memory);
@@ -199,9 +200,6 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
             framebuffer::init(Some(fb), boot_info.hhdm_offset);
             crate::serial_write(b"framebuffer: init ok\r\n");
         }
-    }
-    unsafe {
-        core::ptr::write(core::ptr::addr_of_mut!(crate::ALLOCATOR_PTR), &mut allocator as *mut FrameAllocator);
     }
     crate::paging::fix_kernel_page_table_entries();
     crate::serial_write(b"kernel page tables fixed\r\n");
@@ -350,10 +348,27 @@ fn start_init() -> ! {
         crate::halt();
     }
     subsystems::mark_ready(Subsystem::InitProcess);
-    // Timer desabilitado temporariamente para diagnóstico
-    // time::configure_timer_interrupt();
+    // Configura o timer PIT e habilita interrupções. Sem isto não há preempção
+    // nem wakeup de nanosleep/futex com timeout.
+    time::configure_timer_interrupt();
+    unsafe {
+        asm!("sti", options(nomem, nostack, preserves_flags));
+    }
+    // Diagnóstico de falha de timer: aguarda alguns ticks e verifica se o
+    // contador avançou. Se não, imprime aviso no serial.
+    let ticks_before = time::timer_ticks();
+    let mut waited = 0u64;
+    while time::timer_ticks() == ticks_before && waited < 10_000_000 {
+        waited += 1;
+        core::hint::spin_loop();
+    }
+    if time::timer_ticks() == ticks_before {
+        crate::serial_write(b"AVISO: timer PIT nao esta disparando apos configure_timer_interrupt\r\n");
+    } else {
+        crate::serial_write(b"Timer OK: ticks estao disparando\r\n");
+    }
     subsystems::mark_ready(Subsystem::Timer);
-    crate::serial_write(b"Timer configured; preemptive priority scheduling active\r\n");
+    crate::serial_write(b"Timer configurado; preempcao por prioridade ativa\r\n");
     crate::serial_write(b"about to call process::start\r\n");
     process::start()
 }

@@ -141,42 +141,54 @@ fn decode_delta(low: u8, negative: bool) -> i32 {
 /// Writes `value` to the mouse, consuming its 0xfa acknowledge. A missing
 /// device simply times out and is ignored.
 unsafe fn write_aux(value: u8) {
-    write_command(CMD_WRITE_AUX);
-    wait_for_input_clear();
-    outb(DATA_PORT, value);
-    wait_for_ack();
+    unsafe {
+        write_command(CMD_WRITE_AUX);
+        wait_for_input_clear();
+        outb(DATA_PORT, value);
+        wait_for_ack();
+    }
 }
 
 unsafe fn write_command(value: u8) {
-    wait_for_input_clear();
-    outb(STATUS_PORT, value);
+    unsafe {
+        wait_for_input_clear();
+        outb(STATUS_PORT, value);
+    }
 }
 
 unsafe fn wait_for_ack() {
-    for _ in 0..100_000 {
-        if inb(STATUS_PORT) & STATUS_OUTPUT_FULL != 0 {
-            let _ = inb(DATA_PORT);
-            return;
+    unsafe {
+        for _ in 0..100_000 {
+            if inb(STATUS_PORT) & STATUS_OUTPUT_FULL != 0 {
+                let _ = inb(DATA_PORT);
+                return;
+            }
+            asm!("pause", options(nomem, nostack, preserves_flags));
         }
-        asm!("pause", options(nomem, nostack, preserves_flags));
     }
 }
 
 unsafe fn wait_for_input_clear() {
-    for _ in 0..100_000 {
-        if inb(STATUS_PORT) & STATUS_INPUT_FULL == 0 {
-            return;
+    unsafe {
+        for _ in 0..100_000 {
+            if inb(STATUS_PORT) & STATUS_INPUT_FULL == 0 {
+                return;
+            }
+            asm!("pause", options(nomem, nostack, preserves_flags));
         }
-        asm!("pause", options(nomem, nostack, preserves_flags));
     }
 }
 
 unsafe fn inb(port: u16) -> u8 {
     let value: u8;
-    asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags));
+    unsafe {
+        asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags));
+    }
     value
 }
 
 unsafe fn outb(port: u16, value: u8) {
-    asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
+    unsafe {
+        asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
+    }
 }
