@@ -201,6 +201,26 @@ pub fn phys_to_virt(allocator: &FrameAllocator, physical_address: u64) -> Option
         .map(|virtual_address| virtual_address as *mut u8)
 }
 
+/// Retorna uma referência mutável ao alocador global.
+///
+/// Usa `addr_of_mut!` + ponteiro bruto (em vez de referência direta a
+/// `static mut`), que é a forma aprovada pela edição 2024 para acessar
+/// estáticos mutáveis sem UB.
+pub(crate) fn allocator_mut() -> &'static mut FrameAllocator {
+    unsafe {
+        let ptr = core::ptr::addr_of_mut!(crate::ALLOCATOR);
+        &mut *ptr.cast::<FrameAllocator>()
+    }
+}
+
+/// Retorna uma referência compartilhada ao alocador global da mesma forma.
+pub(crate) fn allocator_ref() -> &'static FrameAllocator {
+    unsafe {
+        let ptr = core::ptr::addr_of!(crate::ALLOCATOR);
+        &*ptr.cast::<FrameAllocator>()
+    }
+}
+
 pub fn usage(allocator: &FrameAllocator) -> (u64, u64) {
     let mut free = 0u64;
     for region in allocator.regions.iter().take(allocator.region_count) {

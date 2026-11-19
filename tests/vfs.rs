@@ -41,26 +41,39 @@ mod ata {
     }
 }
 
-#[path = "../src/block.rs"]
+#[path = "/home/adryan/Downloads/dnu/src/mm/block.rs"]
 mod block;
 // `dfs::mount_primary` consulta o disco primário por `ata::sector_count`, que
 // o `ata` de teste precisa expor mesmo sem I/O real.
-#[path = "../src/dfs.rs"]
+#[path = "/home/adryan/Downloads/dnu/src/fs/dfs.rs"]
 mod dfs;
-#[path = "../src/gpt.rs"]
+#[path = "/home/adryan/Downloads/dnu/src/fs/gpt.rs"]
 mod gpt;
-#[path = "../src/ramfs.rs"]
+#[path = "/home/adryan/Downloads/dnu/src/fs/ramfs.rs"]
 mod ramfs;
-#[path = "../src/vfs.rs"]
+#[path = "/home/adryan/Downloads/dnu/src/fs/vfs.rs"]
 mod vfs;
 
 // `ramfs`/`vfs` resolvem a configuração por `crate::usr::config`. O módulo real
 // é declarado com `#[path]` relativo a este arquivo e reexportado sob `usr`.
-#[path = "../src/config.rs"]
+#[path = "/home/adryan/Downloads/dnu/src/config/config.rs"]
 pub mod config_impl;
 pub mod usr {
     pub use super::config_impl as config;
 }
+
+// `ramfs.rs` chama `crate::time::elapsed_microseconds()`; fornece um stub no
+// host para que o módulo compile sem o kernel completo.
+pub mod time {
+    pub fn elapsed_microseconds() -> Option<u64> {
+        Some(0)
+    }
+}
+
+// `ramfs.rs` escreve diagnóstico via `crate::serial_write` / `serial_write_hex`.
+// Fornece no-ops no host para que o módulo compile sem o kernel completo.
+pub(crate) fn serial_write(_bytes: &[u8]) {}
+pub(crate) fn serial_write_hex(_value: u64) {}
 
 use vfs::{FileSystem, Vfs};
 

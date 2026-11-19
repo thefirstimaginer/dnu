@@ -227,7 +227,13 @@ pub fn direct_start() -> ! {
     let initramfs_bytes = unsafe { core::slice::from_raw_parts(initramfs_start, initramfs_size) };
     if let Err(error) = crate::dzimage::verify(initramfs_bytes, crate::abi::ABI_VERSION) {
         crate::serial_write(b"boot: direct_start dzImage verify FAILED: ");
-        crate::serial_write(error.as_bytes());
+        match error {
+            crate::dzimage::UnpackError::InvalidHeader => crate::serial_write(b"InvalidHeader"),
+            crate::dzimage::UnpackError::InvalidSize => crate::serial_write(b"InvalidSize"),
+            crate::dzimage::UnpackError::ChecksumMismatch => crate::serial_write(b"ChecksumMismatch"),
+            crate::dzimage::UnpackError::AbiMismatch => crate::serial_write(b"AbiMismatch"),
+            crate::dzimage::UnpackError::MissingMember => crate::serial_write(b"MissingMember"),
+        }
         crate::serial_write(b"\r\n");
         crate::halt();
     }

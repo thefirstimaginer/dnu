@@ -116,7 +116,7 @@ pub(crate) static KERNEL_STACKS: SharedStacks = SharedStacks(UnsafeCell::new(Ker
 /// suficientes (OOM).
 pub(crate) fn allocate_kernel_stack() -> Option<u64> {
     let pages = KERNEL_STACK_SIZE / crate::memory::PAGE_SIZE as usize;
-    let allocator = unsafe { crate::ALLOCATOR.assume_init_mut() };
+    let allocator = crate::memory::allocator_mut();
     let mut first_page: Option<u64> = None;
     let mut prev_page: Option<u64> = None;
     for _ in 0..pages {

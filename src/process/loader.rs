@@ -223,7 +223,7 @@ pub fn load(
     location: FrameLocation,
     credentials: ProcessCredentials,
 ) -> Result<Process, LoadError> {
-    let allocator = unsafe { crate::ALLOCATOR.assume_init_mut() };
+    let allocator = crate::memory::allocator_mut();
     crate::serial_write(b"loader: load \"");
     crate::serial_write(name.as_bytes());
     crate::serial_write(b"\" pid=");

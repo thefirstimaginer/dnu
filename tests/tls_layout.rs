@@ -82,7 +82,7 @@ fn no_tls_means_no_fs_base() {
 #[test]
 fn the_loader_uses_the_same_constants() {
     // Guarda-corpo: os números acima precisam existir no loader real.
-    let source = include_str!("../src/exec_loader.rs");
+    let source = include_str!("/home/adryan/Downloads/dnu/src/process/loader.rs");
     assert!(source.contains("const TCB_SIZE: u64 = 0x1000;"));
     assert!(source.contains("const TCB_SELF_OFFSET: u64 = 0;"));
     assert!(source.contains("let block = stack_pointer"));
@@ -96,7 +96,7 @@ fn the_loader_uses_the_same_constants() {
 fn the_dnulink_marks_the_tls_segment() {
     // O DEF precisa trazer o bloco marcado; sem a marca o loader o trataria
     // como página comum e o `%fs` ficaria sem destino.
-    let source = include_str!("../tools/dnulink.rs");
+    let source = include_str!("/home/adryan/Downloads/dnu/tools/dnulink.rs");
     assert!(source.contains("const PT_TLS: u32 = 7;"));
     assert!(source.contains("DEF_SEGMENT_TLS"));
 }

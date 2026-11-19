@@ -4,4 +4,4 @@ target/
 /build
 private/
 /private
-*.md
+/*.md

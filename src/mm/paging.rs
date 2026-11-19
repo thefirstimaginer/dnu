@@ -21,7 +21,11 @@ const USER_MIN: u64 = 0x400000;
 const USER_MAX: u64 = 0x0000_8000_0000_0000;
 
 /// Número máximo de páginas rastreadas como COW por address space.
-const MAX_COW_PAGES: usize = 256;
+///
+/// 4096 é suficiente para processos típicos (heap, stacks, mmap). Se um
+/// processo exceder esse limite, o `fork` falha com ENOMEM em vez de compartilhar
+/// páginas graváveis silenciosamente entre pai e filho.
+const MAX_COW_PAGES: usize = 4096;
 
 /// Tabela de páginas Copy-on-Write compartilhada entre pai e filho após `fork`.
 ///
@@ -143,7 +147,7 @@ impl AddressSpace {
         let cow_table = Box::into_raw(Box::new(CowTable::EMPTY));
         Some(Self {
             root_physical: root.physical_address,
-            allocator,
+            allocator: memory::allocator_mut(),
             cow_table,
         })
     }
@@ -183,9 +187,11 @@ impl AddressSpace {
                 unsafe {
                     ptr::write_bytes(frame.virtual_address, 0, PAGE_SIZE as usize);
                 }
-                *entry = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER;
+                // Tabelas de página intermediárias (PML4/PDPT/PD) não precisam
+                // de gravação: W^X estrito. Apenas PRESENT + USER.
+                *entry = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_USER;
             } else {
-                *entry |= ENTRY_WRITABLE | ENTRY_USER;
+                *entry |= ENTRY_USER;
             }
             table_physical = *entry & ADDRESS_MASK;
         }
@@ -604,7 +610,7 @@ pub fn map_hhdm_range(hhdm_offset: u64, physical_address: u64, length: usize, wr
         return true;
     }
 
-    let allocator = unsafe { crate::ALLOCATOR.assume_init_mut() };
+    let allocator = memory::allocator_mut();
 
     const HUGE_PAGE_SIZE: u64 = 0x200000; // 2MB
     const HUGE_PAGE_MASK: u64 = !(HUGE_PAGE_SIZE - 1);
@@ -707,7 +713,7 @@ pub fn fix_kernel_page_table_entries() {
     const RSVD_MASK: u64 = 0x7ff0_0000_0000_0000; // bits 52-62
     const NX_MASK: u64 = 1 << 63; // bit 63: NX (reserved unless EFER.NXE=1)
 
-    let allocator = unsafe { crate::ALLOCATOR.assume_init_mut() };
+    let allocator = memory::allocator_mut();
 
     let hhdm_offset = allocator.hhdm_offset;
     let root_physical = read_cr3() & ADDRESS_MASK;
@@ -795,13 +801,17 @@ pub fn fix_kernel_page_table_entries() {
                 unsafe {
                     ptr::write_bytes(frame.virtual_address, 0, PAGE_SIZE as usize);
                 }
-                *table = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_WRITABLE;
+                // Tabelas de página intermediárias do kernel: não graváveis,
+                // não de usuário. W^X estrito.
+                *table = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT;
                 mapped_count += 1;
             }
 
             if *index == indices[2] && *table & ENTRY_HUGE != 0 {
                 huge_page = true;
-                let fixed = *table & !(RSVD_MASK | NX_MASK);
+                // Nunca remover NX: páginas de código devem permanecer não-graváveis
+                // e não-executáveis (ou executáveis-somente-leitura, nunca RWX).
+                let fixed = *table & !RSVD_MASK;
                 if fixed != *table {
                     *table = fixed;
                     fixed_count += 1;
@@ -833,12 +843,14 @@ pub fn fix_kernel_page_table_entries() {
                 unsafe {
                     ptr::write_bytes(frame.virtual_address, 0, PAGE_SIZE as usize);
                 }
+                // PTEs de dados do kernel: graváveis e não-executáveis (W^X).
                 unsafe {
-                    *entry_ptr = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_WRITABLE;
+                    *entry_ptr = (frame.physical_address & PHYS_ADDR_MASK) | ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_NX;
                 }
                 mapped_count += 1;
             } else {
-                let fixed = entry & !(RSVD_MASK | NX_MASK);
+                // Nunca remover NX de PTEs existentes: evita criar páginas RWX.
+                let fixed = entry & !RSVD_MASK;
                 if fixed != entry {
                     unsafe {
                         *entry_ptr = fixed;
@@ -869,7 +881,7 @@ pub fn fix_kernel_page_table_entries() {
 }
 
 fn table_pointer(physical: u64) -> Option<*mut u64> {
-    let allocator = unsafe { crate::ALLOCATOR.assume_init_ref() };
+    let allocator = memory::allocator_ref();
     Some(memory::phys_to_virt(allocator, physical)?.cast())
 }
 

@@ -164,7 +164,7 @@ pub extern "C" fn kernel_entry(boot_info: *const boot_info::BootInfo) -> ! {
     unsafe {
         core::ptr::write(core::ptr::addr_of_mut!(crate::ALLOCATOR), MaybeUninit::new(allocator));
     }
-    let mut allocator = unsafe { crate::ALLOCATOR.assume_init_mut() };
+    let mut allocator = memory::allocator_mut();
     let frame_count = memory::init_with_allocator(allocator, entries, boot_info.hhdm_offset, &[]);
     crate::serial_write(b"step: memory init done\r\n");
 

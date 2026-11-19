@@ -800,9 +800,10 @@ pub fn write_file_overlay(path: &str, bytes: &[u8], uid: u32, gid: u32) -> Resul
         fs.overlay[existing_slot.expect("reusable overlay node")].data_start
     } else {
         let start = fs.file_data_used;
-        let end = start + data_capacity;
         fs.file_data[start..start + bytes.len()].copy_from_slice(bytes);
-        fs.file_data_used = end;
+        // Avança apenas pelos bytes realmente escritos, não por data_capacity,
+        // para não desperdiçar espaço no buffer fixo de 64 KiB.
+        fs.file_data_used = start.checked_add(bytes.len()).ok_or(FsError::NoSpace)?;
         start
     };
     if reusable {
@@ -909,12 +910,13 @@ pub fn write_at_overlay(path: &str, offset: usize, input: &[u8]) -> Result<usize
         fs.overlay[existing_slot.expect("reusable overlay node")].data_start
     } else {
         let start = fs.file_data_used;
-        let end = start + data_capacity;
         fs.file_data[start..start + original_length].copy_from_slice(original);
-        fs.file_data_used = end;
+        // Avança apenas pelos bytes realmente usados (new_length), não por
+        // data_capacity, para não desperdiçar espaço no buffer fixo de 64 KiB.
+        fs.file_data_used = start.checked_add(new_length).ok_or(FsError::NoSpace)?;
         start
     };
-    fs.file_data[data_start + offset..data_start + end].copy_from_slice(input);
+    fs.file_data[data_start + offset..data_start + new_length].copy_from_slice(input);
     let slot = existing_slot
         .or_else(|| {
             fs.overlay
