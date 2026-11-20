@@ -5,3 +5,4 @@ target/
 private/
 /private
 /*.md
+Cargo.lock
